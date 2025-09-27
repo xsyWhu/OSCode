@@ -10,7 +10,8 @@ ECNU-OSLAB
 │   │   ├── print.h  
 │   │   └── lock.h  
 │   ├── proc  
-│   │   └── cpu.h  
+│   │   └── cpu.h
+|   |   └── proc.h
 │   ├── common.h  
 │   ├── memlayout.h  
 │   └── riscv.h  
@@ -28,18 +29,22 @@ ECNU-OSLAB
 │   │   ├── spinlock.c (TODO)  
 │   │   └── Makefile    
 │   ├── proc  
-│   │   ├── cpu.c  (TODO)  
+│   │   ├── pro.c  (TODO)  
 │   │   └── Makefile  
 │   ├── Makefile  
 │   └── kernel.ld  
+├── picture
+|   |—— test.png
 ├── Makefile  
-└── common.mk  
+├── common.mk 
+├── README.md
+└── Report.md
 
 ## 核心目标
 
 完成双核的机器启动，能够进入main函数并输出一些东西 (如下图)  
 
-![图片](./picture/01.png)  
+![图片](./picture/test.png)  
 
 ## 具体任务
 

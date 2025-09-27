@@ -4,8 +4,9 @@
 #include "common.h"
 
 void print_init(void);
-void printf(const char* fmt, ...);
+//void printf(const char* fmt, ...);
 void panic(const char* warning);
 void assert(bool condition, const char* warning);
+void puts(const char* s);
 
 #endif

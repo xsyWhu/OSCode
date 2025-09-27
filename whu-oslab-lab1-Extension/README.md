@@ -1,9 +1,8 @@
-# LAB-1: 机器启动
+# LAB-1——添加printf以及扩展功能
 
 ## 组织结构
 ## 代码组织结构
 
-### 2. 代码组织结构
 whu-oslab-lab1  
 ├── include  
 │   ├── uart.h  
@@ -27,7 +26,7 @@ whu-oslab-lab1
 │   │   └── Makefile  
 │   ├── lib  
 │   │   ├── print.c    
-│   │   ├── spinlock.c   
+│   │   ├── spinlock.c  
 │   │   └── Makefile    
 │   ├── proc  
 │   │   ├── pro.c     
@@ -39,7 +38,8 @@ whu-oslab-lab1
 ├── Makefile  
 ├── common.mk  
 ├── README.md  
-└── Report.md  
+└── Report.md
+
 ## 第四章实验说明
 
 本章主要实现：

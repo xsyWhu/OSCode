@@ -13,7 +13,7 @@ void start()
     if (hartid == 0) {
         /* 仅主核初始化打印并输出引导信息 */
         print_init();
-        printf("Hello OS\n");
+        puts("Hello OS");
         /* 如果想让每个核都打印，可以在这里移除 hartid==0 的判断，
            并确保 print.c 中 printf 已有锁保护。 */
     }

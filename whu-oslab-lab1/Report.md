@@ -33,41 +33,40 @@
 ### 2. 代码组织结构
 whu-oslab-lab1  
 ├── include  
-│   │   └── uart.h  
+│   ├── uart.h  
 │   ├── lib  
 │   │   ├── print.h  
 │   │   └── lock.h  
 │   ├── proc  
-│   │   └── cpu.h
-|   |   └── proc.h
+│   │   ├── cpu.h  
+│   │   └── proc.h  
 │   ├── common.h  
 │   ├── memlayout.h  
 │   └── riscv.h  
 ├── kernel  
 │   ├── boot  
-│   │   ├── main.c  (TODO)  
-│   │   ├── start.c (TODO)   
+│   │   ├── main.c   <!-- TODO -->  
+│   │   ├── start.c  <!-- TODO -->  
 │   │   ├── entry.S  
 │   │   └── Makefile  
 │   ├── dev  
 │   │   ├── uart.c  
 │   │   └── Makefile  
 │   ├── lib  
-│   │   ├── print.c (TODO)  
-│   │   ├── spinlock.c (TODO)  
+│   │   ├── print.c  <!-- TODO -->  
+│   │   ├── spinlock.c <!-- TODO -->  
 │   │   └── Makefile    
 │   ├── proc  
-│   │   ├── pro.c  (TODO)  
+│   │   ├── pro.c    <!-- TODO -->  
 │   │   └── Makefile  
 │   ├── Makefile  
 │   └── kernel.ld  
-├── picture
-|   │
-|   └── .png
+├── picture  
+│   └── *.png  
 ├── Makefile  
-├── common.mk 
-├── README.md
-└── Report.md
+├── common.mk  
+├── README.md  
+└── Report.md  
 
 ### 3. 关键数据结构
 - `struct cpu`：表示每个硬件线程（hart）的基本状态。

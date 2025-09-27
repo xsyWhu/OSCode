@@ -3,41 +3,43 @@
 ## 组织结构
 ## 代码组织结构
 
-whu-oslab-lab1-new  
-├── include
-│ │ └── uart.h
-│ ├── lib
-│ │ ├── print.h
-│ │ └── lock.h
-│ ├── proc
-│ │ └── cpu.h | | └── proc.h │ ├── common.h
-│ ├── memlayout.h
-│ └── riscv.h
-├── kernel
-│ ├── boot
-│ │ ├── main.c (TODO)
-│ │ ├── start.c (TODO)
-│ │ ├── entry.S
-│ │ └── Makefile
-│ ├── dev
-│ │ ├── uart.c
-│ │ └── Makefile
-│ ├── lib
-│ │ ├── print.c (TODO)
-│ │ ├── spinlock.c (TODO)
-│ │ └── Makefile
-│ ├── proc
-│ │ ├── pro.c (TODO)
-│ │ └── Makefile
-│ ├── Makefile
-│ └── kernel.ld
-├── picture 
-| |—— .png 
-├── Makefile
-├── common.mk 
-├── README.md 
-└── Report.md
-
+### 2. 代码组织结构
+whu-oslab-lab1  
+├── include  
+│   ├── uart.h  
+│   ├── lib  
+│   │   ├── print.h  
+│   │   └── lock.h  
+│   ├── proc  
+│   │   ├── cpu.h  
+│   │   └── proc.h  
+│   ├── common.h  
+│   ├── memlayout.h  
+│   └── riscv.h  
+├── kernel  
+│   ├── boot  
+│   │   ├── main.c     
+│   │   ├── start.c    
+│   │   ├── entry.S  
+│   │   └── Makefile  
+│   ├── dev  
+│   │   ├── uart.c  
+│   │   └── Makefile  
+│   ├── lib  
+│   │   ├── print.c    
+│   │   ├── spinlock.c   
+│   │   └── Makefile    
+│   ├── proc  
+│   │   ├── pro.c     
+│   │   └── Makefile  
+│   ├── Makefile  
+│   └── kernel.ld  
+├── picture  
+│   └── *.png  
+├── Makefile  
+├── common.mk  
+├── README.md  
+└── Report.md  
 ## 第四章实验说明
 
 本章主要实现：

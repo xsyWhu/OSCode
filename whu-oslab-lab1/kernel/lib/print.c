@@ -37,70 +37,6 @@ void puts(const char *s)
     spinlock_release(&print_lk);
 }
 
-/* 输出无符号数（base 可为 10 或 16） */
-static void print_number(unsigned long num, int base, int sign)
-{
-    char buf[32];
-    int i = 0;
-    if (num == 0) {
-        print_putc('0');
-        return;
-    }
-    if (sign && (long)num < 0) {
-        print_putc('-');
-        num = (unsigned long)(-(long)num);
-    }
-    while (num) {
-        int d = num % base;
-        buf[i++] = "0123456789abcdef"[d];
-        num /= base;
-    }
-    while (i--) print_putc(buf[i]);
-}
-
-/* 简单 printf（支持 %s %d %x %p %c %%） */
-void printf(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-
-    spinlock_acquire(&print_lk);
-
-    const char *p = fmt;
-    while (p && *p) {
-        if (*p != '%') {
-            print_putc(*p++);
-            continue;
-        }
-        p++;
-        if (*p == 's') {
-            char *s = va_arg(ap, char*);
-            if (!s) s = "(null)";
-            while (*s) print_putc(*s++);
-        } else if (*p == 'd') {
-            int d = va_arg(ap, int);
-            print_number((unsigned long)d, 10, 1);
-        } else if (*p == 'x' || *p == 'p') {
-            unsigned long x = va_arg(ap, unsigned long);
-            print_number(x, 16, 0);
-        } else if (*p == 'c') {
-            int c = va_arg(ap, int);
-            print_putc((char)c);
-        } else if (*p == '%') {
-            print_putc('%');
-        } else {
-            /* 未知格式，原样输出 */
-            print_putc('%');
-            if (*p) print_putc(*p);
-        }
-        if (*p) p++;
-    }
-
-    spinlock_release(&print_lk);
-
-    va_end(ap);
-}
-
 /* panic 与 assert 实现 */
 void panic(const char *s)
 {
@@ -124,3 +60,15 @@ void assert(bool condition, const char* warning)
 {
     if (!condition) panic(warning);
 }
+/*
+// 输出无符号数（base 可为 10 或 16)
+static void print_number(unsigned long num, int base, int sign)
+{
+    //
+}
+// 简单 printf（支持 %s %d %x %p %c %%)
+void printf(const char *fmt, ...)
+{
+    //
+} 
+*/

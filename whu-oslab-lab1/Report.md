@@ -62,7 +62,8 @@ whu-oslab-lab1
 │   ├── Makefile  
 │   └── kernel.ld  
 ├── picture
-|   |—— test.png
+|   │
+|   └── .png
 ├── Makefile  
 ├── common.mk 
 ├── README.md

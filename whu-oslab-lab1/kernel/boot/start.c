@@ -24,12 +24,14 @@ void start()
     }
 }
 //测试有几个核，结果显示有两个
-/*void start()
+/*
+void start()
 {
     unsigned long hartid;
     asm volatile("csrr %0, mhartid" : "=r"(hartid));
 
     print_init();          // 让最后一个核初始化即可，见下方“安全做法”
-    printf("Hello OS from hartid=%d\n", hartid);
+    puts("Hello OS\n");
     while (1) asm volatile("wfi");
-}*/
+}
+*/

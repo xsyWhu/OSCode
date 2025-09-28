@@ -65,7 +65,7 @@ void uart_putc_sync(int c)
   while((ReadReg(LSR) & LSR_TX_IDLE) == 0);
   
   // 输出
-  WriteReg(THR, c);
+  WriteReg(THR, c); 
 
   pop_off();
 }

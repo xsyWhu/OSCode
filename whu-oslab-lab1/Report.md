@@ -45,19 +45,19 @@ whu-oslab-lab1
 │   └── riscv.h  
 ├── kernel  
 │   ├── boot  
-│   │   ├── main.c   <!-- TODO -->  
-│   │   ├── start.c  <!-- TODO -->  
+│   │   ├── main.c    
+│   │   ├── start.c    
 │   │   ├── entry.S  
 │   │   └── Makefile  
 │   ├── dev  
 │   │   ├── uart.c  
 │   │   └── Makefile  
 │   ├── lib  
-│   │   ├── print.c  <!-- TODO -->  
-│   │   ├── spinlock.c <!-- TODO -->  
+│   │   ├── print.c   
+│   │   ├── spinlock.c   
 │   │   └── Makefile    
 │   ├── proc  
-│   │   ├── pro.c    <!-- TODO -->  
+│   │   ├── pro.c      
 │   │   └── Makefile  
 │   ├── Makefile  
 │   └── kernel.ld  

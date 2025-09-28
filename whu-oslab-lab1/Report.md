@@ -46,14 +46,14 @@ whu-oslab-lab1
 ├── kernel  
 │   ├── boot  
 │   │   ├── main.c    
-│   │   ├── start.c  
+│   │   ├── start.c    
 │   │   ├── entry.S  
 │   │   └── Makefile  
 │   ├── dev  
 │   │   ├── uart.c  
 │   │   └── Makefile  
 │   ├── lib  
-│   │   ├── print.c  
+│   │   ├── print.c   
 │   │   ├── spinlock.c   
 │   │   └── Makefile    
 │   ├── proc  
@@ -62,7 +62,7 @@ whu-oslab-lab1
 │   ├── Makefile  
 │   └── kernel.ld  
 ├── picture  
-│   └── *.png  
+│   └── *.png <*存放所有运行测试截图*>  
 ├── Makefile  
 ├── common.mk  
 ├── README.md  

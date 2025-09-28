@@ -25,7 +25,7 @@
 ### 1. 架构设计说明
 本实验的目标是基于 RISC-V 架构，完成一个简化的操作系统内核启动过程。系统整体结构参考 xv6，主要模块包括：
 - **boot**：引导代码，负责栈初始化、BSS 段清零、跳转到 C 语言入口。
-- **lib**：基础库，提供 printf、spinlock 等实现。
+- **lib**：基础库，提供 打印输出、自旋锁 等功能实现。
 - **dev**：外设驱动，如 UART 串口输出。
 - **proc**：进程与 CPU 抽象，提供 `mycpu` / `mycpuid`。
 - **kernel.ld**：链接脚本，规定内存布局并导出符号。
@@ -45,19 +45,19 @@ whu-oslab-lab1
 │   └── riscv.h  
 ├── kernel  
 │   ├── boot  
-│   │   ├── main.c   <!-- TODO -->  
-│   │   ├── start.c  <!-- TODO -->  
+│   │   ├── main.c    
+│   │   ├── start.c  
 │   │   ├── entry.S  
 │   │   └── Makefile  
 │   ├── dev  
 │   │   ├── uart.c  
 │   │   └── Makefile  
 │   ├── lib  
-│   │   ├── print.c  <!-- TODO -->  
-│   │   ├── spinlock.c <!-- TODO -->  
+│   │   ├── print.c  
+│   │   ├── spinlock.c   
 │   │   └── Makefile    
 │   ├── proc  
-│   │   ├── pro.c    <!-- TODO -->  
+│   │   ├── pro.c      
 │   │   └── Makefile  
 │   ├── Makefile  
 │   └── kernel.ld  
@@ -87,7 +87,7 @@ whu-oslab-lab1
 
 ### 1. 实现步骤记录
 1. **环境搭建**  
-   - 安装 QEMU、交叉编译工具链（`riscv64-unknown-elf-gcc`）。  
+   - 安装 Ubuntu、QEMU、交叉编译工具链（`riscv64-unknown-elf-gcc`）。  
    - 使用 `git` 初始化仓库并整理目录结构。
 2. **修改 entry.S**  
    - 添加 BSS 清零循环，确保全局变量初始化。
@@ -95,13 +95,13 @@ whu-oslab-lab1
    - 导出 `edata`、`end` 符号供汇编清零使用。
 4. **补全 print.c**  
    - 定义 `panicked` 全局变量。  
-   - 实现 `panic`、`printf`、`assert`，并参考xv6加入自旋锁保护,在打印的时候添加锁机制保护。
-5. **实现 spinlock.c**  
+   - 实现 `panic`、`puts`、`assert`，并参考xv6加入自旋锁保护,在打印的时候添加锁机制保护。
+5. **参考xv6实现 spinlock.c**  
    - 编写 `acquire/release`，保证多核同步。  
 6. **实现 proc.c / cpu.h**  
    - 定义 `struct cpu` 和 `mycpuid`，封装 `tp` 寄存器读取。
 7. **修改 start.c**  
-   - 初始化 UART 并调用 `printf("Hello OS")`。
+   - 初始化 UART 并调用 `puts("Hello OS")`。
 
 ### 2. 遇到的问题与解决方案
 - **问题 1：找不到交叉编译器 `riscv64-linux-gnu-gcc`**  
@@ -111,10 +111,10 @@ whu-oslab-lab1
 - **问题 3：`panic` 声明和实现不一致**  
   - 解决：统一函数签名为 `void panic(const char *s)`。  
 - **问题 4：多核同时打印导致输出乱序**  
-  - 解决：只允许 hart0 打印，或者使用 spinlock 保护 `printf`。  
+  - 解决：只允许 hart0 打印，或者使用 spinlock 保护 `printf`等打印输出函数。  
 
 ### 3. 源码理解总结
-- **启动流程**：QEMU 加载 kernel → `_entry` 设置栈 → 清零 BSS → `start()` → 初始化 UART → `printf("Hello 05")`。
+- **启动流程**：QEMU 加载 kernel → `_entry` 设置栈 → 清零 BSS → `start()` → 初始化 UART → `puts("Hello 05")`。
 - **内核模块划分**：boot 负责硬件初始化，lib 负责基本功能，proc 提供 CPU 抽象。
 
 ### 4. 调试流程

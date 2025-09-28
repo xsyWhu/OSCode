@@ -17,7 +17,7 @@ whu-oslab-lab1
 ├── kernel  
 │   ├── boot  
 │   │   ├── main.c    
-│   │   ├── start.c   
+│   │   ├── start.c    
 │   │   ├── entry.S  
 │   │   └── Makefile  
 │   ├── dev  
@@ -25,14 +25,14 @@ whu-oslab-lab1
 │   │   └── Makefile  
 │   ├── lib  
 │   │   ├── print.c   
-│   │   ├── spinlock.c 
+│   │   ├── spinlock.c   
 │   │   └── Makefile    
 │   ├── proc  
-│   │   ├── pro.c 
+│   │   ├── pro.c      
 │   │   └── Makefile  
 │   ├── Makefile  
 │   └── kernel.ld  
-├── picture  
+├── picture  <*存放所有运行测试截图*> 
 │   └── *.png  
 ├── Makefile  
 ├── common.mk  

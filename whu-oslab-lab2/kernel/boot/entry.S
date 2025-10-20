@@ -10,6 +10,10 @@ _entry:
         mul a0, a0, a1
         add sp, sp, a0
 
+        /* 为 C 代码和锁归属设置 tp=mhartid */
+        csrr a0, mhartid
+        mv  tp, a0
+
         /* 清零 BSS: 使用 linker script 导出的 edata/end */
         la  a0, edata    /* a0 = start of bss */
         la  a1, end      /* a1 = end of bss */

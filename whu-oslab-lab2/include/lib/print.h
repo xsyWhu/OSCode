@@ -7,10 +7,11 @@ void print_init(void);
 void printf(const char* fmt, ...);
 void panic(const char* warning);
 void assert(bool condition, const char* warning);
-
-#endif
-
 void clear_screen(void);
 void goto_xy(int row, int col);
 void set_color(int fg, int bg);
 void reset_color(void);
+
+#endif
+
+

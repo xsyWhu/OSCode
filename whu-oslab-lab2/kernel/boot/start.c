@@ -37,7 +37,13 @@ void start()
         for (int i=3;i>0;i--){ printf("%d ", i); }
         printf("\n");
         clear_screen();
-        printf("Screen cleared. End of demo.\n");
+        printf("Screen cleared.\n");
+
+        printf("d: %d %d %d\n", 0, -1, -2147483648);
+        printf("x: %x %x\n", 0x12, 0xdeadbeef);
+        int *p = (int*)0x80200000;
+        printf("p: %p\n", p);
+        printf("End of demo.\n");
     }
 
     /* 如果想让每个核都打印，可以在这里移除 hartid==0 的判断，

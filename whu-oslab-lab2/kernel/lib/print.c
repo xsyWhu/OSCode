@@ -4,6 +4,7 @@
 #include "lib/print.h"
 #include "dev/uart.h"
 #include "lib/lock.h"
+#include "dev/console.h"
 
 /* 全局 panic 标志（需要在 BSS 清零后为 0） */
 int panicked = 0;
@@ -12,17 +13,26 @@ int panicked = 0;
 static spinlock_t print_lk;
 
 /* 低级单字符打印 */
+// static void print_putc(char c) {
+//     /* 在 panic 状态下仍尽量输出 */
+//     if (!panicked) {
+//         uart_putc_sync((int)c);
+//     }
+// }
+
+/*低级字符打印（经由console层）*/
 static void print_putc(char c) {
     /* 在 panic 状态下仍尽量输出 */
     if (!panicked) {
-        uart_putc_sync((int)c);
+        console_putc((int)c);
     }
 }
 
 /* 初始化打印子系统（只要幂等即可） */
 void print_init(void)
 {
-    uart_init(); //配置波特率，FIFO，引脚复用等
+    //uart_init(); //配置波特率，FIFO，引脚复用等
+    console_init(); //初始化控制台,通过console层完成底层UART初始化
     spinlock_init(&print_lk, "print"); 
 }
 
@@ -81,8 +91,13 @@ void printf(const char *fmt, ...) //可变参数函数
                 print_putc(*s++);
         } else if (*p == 'd') { //处理十进制
             int d = va_arg(ap, int); //取出一个参数
-            print_number((unsigned long)d, 10, 1);
-        } else if (*p == 'x' || *p == 'p') { //十六进制
+            /*修复，先转成long再转无符号，保留符号位用于附属判断*/
+            //print_number((unsigned long)d, 10, 1);
+            print_number((unsigned long)(long)d, 10, 1);
+        } else if (*p == 'x') { //十六进制
+            unsigned int x = va_arg(ap, unsigned int);
+            print_number((unsigned long)x, 16, 0);
+        } else if (*p == 'p') {
             unsigned long x = va_arg(ap, unsigned long);
             print_number(x, 16, 0);
         } else if (*p == 'c') { //字符

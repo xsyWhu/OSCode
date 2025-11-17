@@ -48,8 +48,6 @@ pte_t* vm_getpte(pgtbl_t pgtbl, uint64 va, bool alloc)
     }
     return &pgtbl[VA_TO_VPN(va, 0)];
 }
-
-
 // vm_mappages: 在页表中创建一段虚拟地址到物理地址的映射
 // - pgtbl: 目标页表
 // - va:    虚拟地址起始
@@ -179,9 +177,6 @@ void kvm_inithart() {
     sfence_vma();
 }
 
-
-
-
 // 计算虚拟地址范围
 static uint64 calc_va_start(int level2_idx, int level1_idx, int level0_idx) {
     return ((uint64)level2_idx << 30) | ((uint64)level1_idx << 21) | ((uint64)level0_idx << 12);
@@ -220,7 +215,6 @@ static void print_hex_padded(uint64 value) {
         }
     }
 }
-
 
 static void vm_print_recursive_new(pgtbl_t pgtbl, int level, int indices[3]) {
     for (int i = 0; i < 512; i++) {
@@ -262,4 +256,53 @@ void vm_print(pgtbl_t pgtbl) {
     printf("  ----------------------------------------------------------\n");
     printf("  Legend: r=read, w=write, x=execute, u=user\n");
     printf("=== END PAGE TABLE ===\n\n");
+}
+
+// 递归释放页表树
+static void vm_freewalk(pgtbl_t pgtbl, int level, bool free_leaf) {
+    for (int i = 0; i < 512; i++) {
+        pte_t pte = pgtbl[i];
+        if (!(pte & PTE_V)) {
+            continue;
+        }
+
+        if (PTE_CHECK(pte) && level > 0) {
+            // 中间页表：递归释放子页表
+            uint64 child_pa = PTE_TO_PA(pte);
+            vm_freewalk((pgtbl_t)child_pa, level - 1, free_leaf);
+
+            // 子页表本身是通过 pmem_alloc(true) 分配的
+            pmem_free(child_pa, true);
+
+        } else {
+            // 叶子 PTE（level==0 或 R/W/X 非 0）
+            if (free_leaf) {
+                uint64 pa = PTE_TO_PA(pte);
+
+                // 和 vm_unmappages 同一套逻辑：内核区 / 用户区
+                uint64 kbegin = PG_ROUND_UP((uint64)ALLOC_BEGIN);
+                uint64 ksplit = kbegin + 1024 * PGSIZE; // 或硬编码 1024*PGSIZE
+
+                if (pa >= kbegin && pa < ksplit) {
+                    pmem_free(pa, true);
+                } else if (pa >= ksplit && pa < PHYSTOP) {
+                    pmem_free(pa, false);
+                } else {
+                    panic("vm_freewalk: leaf pa out of known region");
+                }
+            }
+        }
+
+        // 无论如何，最后都把 PTE 清零
+        pgtbl[i] = 0;
+    }
+}
+void vm_destroy_pagetable(pgtbl_t root, bool free_leaf) {
+    if (root == NULL) {
+        return;
+    }
+    vm_freewalk(root, 2, free_leaf);
+    // 最后释放根页表本身
+    pmem_free((uint64)root, true);
+    printf("vm_destroy_pagetable: page table destroyed\n");
 }

@@ -3,6 +3,7 @@
 # 注意: 此时是M-mode
 
 .section .text
+.globl _entry  # 明确声明 _entry 为全局符号
 _entry:
         # CPU_stack 定义于start.c中
         # sp = CPU_stack + ((hartid + 1) * 4096)

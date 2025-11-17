@@ -11,5 +11,8 @@ extern char ALLOC_BEGIN[];
 void  pmem_init(void);
 void* pmem_alloc(bool in_kernel);
 void  pmem_free(uint64 page, bool in_kernel);
-
+int pmem_alloc_pages(bool in_kernel, int n, uint64 pages[]);
+uint32 pmem_free_pages_count(bool in_kernel);
+// 分配多个物理页面，包装函数
+int alloc_pages(int n, bool in_kernel, uint64 pages[]);
 #endif

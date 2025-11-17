@@ -1,53 +1,57 @@
-# LAB-2——添加printf以及扩展功能
+# Lab3 —— 内存管理子系统实现
 
 ## 组织结构
-## 代码组织结构
+### 代码组织结构
 
-whu-oslab-lab1  
-├── include  
-│   ├── uart.h  
-│   ├── lib  
-│   │   ├── print.h  
-│   │   └── lock.h  
-│   ├── proc  
-│   │   ├── cpu.h  
-│   │   └── proc.h  
-│   ├── common.h  
-│   ├── memlayout.h  
-│   └── riscv.h  
-├── kernel  
-│   ├── boot  
-│   │   ├── main.c     
-│   │   ├── start.c    
-│   │   ├── entry.S  
-│   │   └── Makefile  
-│   ├── dev  
-│   │   ├── uart.c  
-│   │   └── Makefile  
-│   ├── lib  
-│   │   ├── print.c    
-│   │   ├── spinlock.c  
-│   │   └── Makefile    
-│   ├── proc  
-│   │   ├── pro.c     
-│   │   └── Makefile  
-│   ├── Makefile  
-│   └── kernel.ld  
-├── picture  
-│   └── *.png  
-├── Makefile  
-├── common.mk  
-├── README.md  
-└── Report.md
+whu-oslab-lab3
+├── include 
+│   ├── uart.h                         // (串口头文件)
+│   ├── lib 
+│   │   ├── print.h                    // (打印库头文件)
+│   │   └── lock.h                     // (锁/自旋锁头文件)
+│   ├── proc 
+│   │   ├── cpu.h                      // (CPU/Hart 相关)
+│   │   └── proc.h                     // (进程/线程相关)
+│   ├── mem 
+│   │   ├── pmem.h                     // (新增: 物理内存管理接口)
+│   │   └── vmem.h                     // (新增: 虚拟内存/页表管理接口)
+│   ├── common.h                       // (基本类型定义)
+│   ├── memlayout.h                    // (物理内存布局)
+│   └── riscv.h                        // (RISC-V 寄存器和页宏)
+├── kernel 
+│   ├── boot 
+│   │   ├── main.c                     // (内核入口，包含 pmem/vmem 测试)
+│   │   ├── start.c                    // (启动代码 C 部分)
+│   │   ├── entry.S                    // (启动代码 汇编部分)
+│   │   └── Makefile 
+│   ├── dev 
+│   │   ├── uart.c                     // (串口驱动实现)
+│   │   └── Makefile 
+│   ├── lib 
+│   │   ├── print.c                    // (打印库实现)
+│   │   ├── spinlock.c                 // (自旋锁实现)
+│   │   └── Makefile 
+│   ├── proc 
+│   │   ├── pro.c                      // (进程/线程实现)
+│   │   └── Makefile 
+│   ├── mem 
+│   │   ├── pmem.c                     // (新增: 物理内存分配器实现)
+│   │   ├── vmem.c                     // (新增: 页表管理与虚拟内存初始化)
+│   │   └── Makefile                   // (mem 目录下的 Makefile)
+│   ├── Makefile 
+│   └── kernel.ld                      // (链接脚本)
+├── picture 
+│   └── *.png                          // (图片资源)
+├── Makefile                           // (顶层 Makefile)
+├── common.mk                          // (通用配置)
+├── README.md                          // (项目说明)
+└── Report.md                          // (实验报告)
 
-## Lab2实验说明
+## Lab3实验说明
 
 本次实验主要实现：
 
-- 内核最小输出环境（UART、BSS 清零、多核栈）。
-- `printf`：支持 %d/%x/%s/%c/%%，并发安全。
-- 清屏与控制台功能：`clear_screen()`、`goto_xy()`、`set_color()`、`reset_color()`。
-- 综合演示：在 `start.c` 展示输出、定位、颜色控制和清屏。
+内存管理相关的功能——alloc_pages、destroy_pagetables等
 
 运行方法：
 
@@ -56,5 +60,4 @@ make qemu
 
 预期效果：
 
-- 打印 "Hello OS"
-- 展示 printf 功能、光标定位、清屏效果、彩色输出
+成功通过五个测试——map 、 unmap 、连续alloc 、destroy 、 对齐检查及double free check——panic

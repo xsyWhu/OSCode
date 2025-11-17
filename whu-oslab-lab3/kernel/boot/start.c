@@ -9,7 +9,7 @@ __attribute__ ((aligned (16))) uint8 CPU_stack[4096 * NCPU];
 
 void start()
 {
-    unsigned long x = r_mstatus();
+  unsigned long x = r_mstatus();
   x &= ~MSTATUS_MPP_MASK;
   x |= MSTATUS_MPP_S;
   w_mstatus(x);

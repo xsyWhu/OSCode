@@ -71,6 +71,9 @@ void   vm_print(pgtbl_t pgtbl);
 pte_t* vm_getpte(pgtbl_t pgtbl, uint64 va, bool alloc);
 void   vm_mappages(pgtbl_t pgtbl, uint64 va, uint64 pa, uint64 len, int perm);
 void   vm_unmappages(pgtbl_t pgtbl, uint64 va, uint64 len, bool freeit);
+// newAdding 
+// 销毁页表
+void   vm_destroy_pagetable(pgtbl_t root, bool free_leaf);
 
 void   kvm_init();
 void   kvm_inithart();

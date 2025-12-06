@@ -1,101 +1,115 @@
-# Lab5 报告 —— 进程管理与调度
+# Lab7 报告 —— 文件系统实现与设计
 
-## 1. 系统设计
+## 1. 系统设计概述
 
-### 1.1 架构概述
+本次实验实现了一个简化的 xv6 风格文件系统，目标是在内核中提供：块设备抽象、缓冲缓存（buffer cache）、inode 缓存、目录与文件的读写创建接口以及简单的写前日志。文件系统主要以 RAM-backed block device 为后端，亦包含与 QEMU virtio-blk 的对接代码以支持真实设备。
 
-本实验在已有内核基础上补齐“内核线程”级别的进程管理与调度。总体结构：
+主要组件分布：
+- 核心 FS 实现：`kernel/fs/fs.c`（inode 缓存、分配、bmap、目录、读写）。
+- 缓冲缓存：`kernel/fs/bio.c`（LRU 管理，封装设备读写）。
+- 文件接口：`kernel/fs/file.c`（文件表、file read/write/close）。
+- 日志：`kernel/fs/log.c`（简化的 write-ahead log 接口）。
+- 块设备：`kernel/fs/ramdisk.c`（内存盘）与 `kernel/dev/virtio_blk.c`（virtio 驱动）。
 
-- **进程子系统（`kernel/proc/proc.c`）**：负责 PID 分配、进程生命周期管理、上下文保存（`struct context`）以及轮转调度 `scheduler()`。
-- **中断与计时器**：在 `kernel/trap/trap_kernel.c` 的时钟中断中更新系统 tick，并在 Hart0 上调用 `yield()` 实现抢占。
-- **启动与测试驱动（`kernel/boot/main.c`）**：启动时创建一个测试进程 `run_all_tests()`，依次运行教师要求的各项测试，最后启动 worker demo 展示调度效果。
+实现遵循简洁、易理解且对教学友好的原则，同时保留与 xv6 相似的接口以便将来扩展。
 
-### 1.2 关键数据结构
+## 2. 关键数据结构
 
-| 数据结构 | 定义位置 | 作用 |
-| --- | --- | --- |
-| `struct context` | `include/proc/proc.h` | 存放 `ra/sp` 与 `s0~s11`，与 `swtch.S` 中保存寄存器保持一致。 |
-| `enum proc_state` | `include/proc/proc.h` | 记录进程状态：`UNUSED/RUNNABLE/RUNNING/SLEEPING/ZOMBIE`。 |
-| `struct proc` | `include/proc/proc.h` | 记录 PID、状态、内核栈地址、上下文、父进程及退出码等。 |
-| `struct cpu` | `include/proc/proc.h` | 保存每个 hart 当前运行的进程及调度器上下文，支持 `mycpu()/myproc()`。 |
-| `proc_table[NPROC]` | `kernel/proc/proc.c` | 进程表，线性扫描寻找空槽并追踪所有进程。 |
+- 超级块（`struct superblock`，在 `include/fs/fs.h`）：记录文件系统布局：日志起始、inode 起始、bmap 起始、总块数等。  
+- on-disk inode（`struct dinode`）：文件类型、大小、直接/间接块地址数组（`NDIRECT + 1`）。
+- in-memory inode（`struct inode`）：`dev/inum/ref/valid/type/size/addrs[]`。使用 icache（数组）作简化缓存，`NINODE = 50`。  
+- 缓冲区（`struct buf`）：包含块号、设备号、数据缓存、LRU 链表指针与引用计数。  
+- 日志结构（`struct log`、`logheader`）：用于 write-ahead 接口（实现为写穿/简化）。
 
-### 1.3 与 xv6 的对比
+重要常量：`BSIZE = 4096`、`RAMDISK_BLOCKS = 8192`、`LOGSIZE = 10`、`NDIRECT = 12`。
 
-- **范围更小**：只实现内核线程，不包含用户态地址空间、系统调用、文件句柄等复杂资源。
-- **调度策略相同**：同样使用最简单的轮转调度，遍历进程表选择 `RUNNABLE` 进程。
-- **中断驱动**：保持 `timer_interrupt_handler()` 中调用 `yield()` 的结构，与 xv6 的抢占设计一致。
+## 3. 核心算法与流程
 
-### 1.4 设计决策
+- 初始化：`fs_init()` 负责初始化 buffer cache、file table、磁盘（virtio 或 ramdisk）、读 superblock；若 superblock 缺失则格式化（写 superblock、初始化日志、标记保留块、分配 root inode 并写入 `.`/`..`）。
 
-1. **先实现 kernel thread**：先确保上下文切换、抢占调度正确，再考虑用户态。
-2. **单核 tick 驱动**：只在 Hart0 更新 tick 并调度，Hart1 进入 idle，使逻辑更清晰。
-3. **测试内嵌**：以进程形式运行所有测试，方便提交时快速展示结果。
+- 块分配/释放：
+  - `balloc()` 扫描 bmap（按 BPB 单位）查找空闲位并分配块，分配时写入日志（`log_write`）。
+  - `bfree()` 清除 bmap 对应位并写日志。
 
-## 2. 实验过程
+- inode 管理：
+  - `iget()` 从 icache 获取 inode（若缓存中存在则 ref++，否则分配空 slot）。
+  - `ilock()` 将 on-disk dinode 读入 inode（若 valid==0），并填充内存字段。注意此处用的是自旋锁保护 icache，而 inode 不使用睡眠锁以简化实现。
+  - `iput()` 当引用数下降且 nlink==0 时释放所有数据块并将 type 置为 T_UNUSED，同时更新磁盘。  
 
-### 2.1 实现步骤
+- 块映射（bmap）：为 inode 的第 n 块返回磁盘块号；对直接和间接块进行处理（若需要，分配间接块及其条目）。
 
-1. **补充数据结构**：完善 `struct context/struct proc/struct cpu`，与 `swtch.S` 对接。
-2. **实现进程管理接口**：在 `kernel/proc/proc.c` 中完成 `proc_init/create_process/exit_process/wait_process/yield/scheduler`。
-3. **时钟抢占**：`timer_interrupt_handler()` 在 Hart0 上调用 `timer_update()` 后判断 `PROC_RUNNING` 进程并 `yield()`。
-4. **测试框架**：在 `main.c` 中实现 `run_all_tests()`，包含 `test_process_creation`、`test_scheduler`、`test_synchronization`、`debug_proc_table`。
-5. **worker demo**：测试结束后启动 fast/medium/slow 三个 worker 进程，展示轮转效果。
+- 读写：
+  - `readi()` 基于 bmap 查找对应数据块，通过 buffer cache `bread()` 读取并拷贝到目标地址（支持内核/用户拷贝）。
+  - `writei()` 使用 `bmap()` 确保块被分配，写入 buffer 并通过 `log_write()` 写回。写入时检查文件大小上限（`MAXFILE * BSIZE`）。
 
-### 2.2 问题与解决
+- 目录处理：`dirlookup`/`dirlink`/`namei`/`nameiparent` 等实现路径解析与目录条目增删。
 
-| 问题 | 解决方案 |
-| --- | --- |
-| `exit_process` 标记 `noreturn` 但编译器认为可能返回 | 在 `panic` 后加入死循环，保证控制流不返回。 |
-| worker 输出刷屏 | 在 `worker_body()` 中通过 `last_report` 控制每 100 次迭代才打印一次。 |
-| 测试产生日志过多难以区分 | 将每组测试封装为函数，添加 `[TEST]` 前缀方便阅读。 |
-| `test_process_creation` 未使用变量导致 `-Werror` | 删除 `pids[]`，只统计创建数量。 |
+- 缓冲缓存：`binit()` 初始化固定大小缓存（`NBUF = 32`）；采用双向链表维护 LRU，`bread()` 在缓存未命中时调用 `virtio_disk_rw()`（或 ramdisk）从设备读取数据。缓存维护命中/未命中计数以便统计。
 
-### 2.3 源码理解
+- 日志：为了接口一致性，提供 `begin_op()`/`end_op()`/`log_write()`。当前对 RAM 磁盘，`log_write()` 直接走 `bwrite()`（写穿），`recover_from_log()` 空实现。
 
-- `swtch()` 是核心的上下文切换入口，保存/恢复 `s` 寄存器与 `sp/ra`，让 C 层只需维护 `struct context`。
-- `scheduler()` 自身作为一个“内核线程”，在 `cpu.ctx` 中运行；`proc_trampoline()` 是所有新进程的入口，执行完用户函数后调用 `exit_process()`。
-- 时钟中断通过软件中断委托至 S-mode，`timer_interrupt_handler()` 既维护 tick 又触发 `yield()`，实现抢占式多任务。
+## 4. 实现细节与权衡
 
-## 3. 测试验证
+- RAM 磁盘：`ramdisk.c` 提供线程安全的内存块读写（使用自旋锁），便于在没有 virtio 设备的环境仍能测试 FS。  
+- Buffer cache：为简单起见没有使用哈希表，采用线性扫描 LRU。这样实现较易懂但在规模放大时性能有限。  
+- Inode 缓存：使用固定数组 `icache`，避免复杂的回收/替换策略。适合教学场景，但真实系统需更复杂的数据结构（哈希 + 回收）。
 
-### 3.1 功能测试
+## 5. 测试与验证
 
-1. **test_process_creation**：批量创建 `simple_task`，观察其多次 `yield` 与退出，验证 PID 分配、进程回收。
-2. **test_scheduler**：三个 `cpu_task` 执行不同强度计算，轮流占用 CPU，证明调度器公平且能被时钟抢占。
-3. **test_synchronization**：使用 `spinlock` 实现生产者-消费者模型，检查 `produced_total == consumed_total`。
-4. **debug_proc_table**：遍历 `proc_table`，打印每个活跃进程的状态，便于调试 ZOMBIE/UNUSED 转换。
+建议测试项：
+- 启动后观察初始化日志（若 filesystem 被格式化，会打印 `virtio blk` 探测信息或 ramdisk 相关信息）。
+- 在内核测试进程中（`kernel/boot/main.c`）添加文件系统操作：创建文件、写入/读取、创建目录、列目录，检查返回值与内容正确性。  
+- 使用导出的统计函数观察运行时指标：
+  - 缓冲缓存命中/未命中：`bcache_get_hits()` / `bcache_get_misses()`。
+  - RAM 磁盘读写次数：`ramdisk_get_reads()` / `ramdisk_get_writes()`。
+  - 空闲块/空闲 inode：`fs_count_free_blocks()` / `fs_count_free_inodes()`。
 
-### 3.2 行为观察
+在我的实现中，常见测试场景与观察：
+- 创建并写入若干文件后，`fs_count_free_blocks()` 会减少；读写操作会在 `bcache` 上产生命中与未命中统计。
+- 对小文件的重复读取多次会迅速提高缓存命中率，说明 bcache 的 LRU 能在工作集较小时发挥作用。
 
-- Hart1 进入 `wfi` 等待，调度全部发生在 Hart0。
-- worker demo 中，fast/medium/slow 的 `iter` 与 `ticks` 体现了不同负载下的调度公平性。
+## 6. 典型问题与解决
 
-### 3.3 异常/性能测试
+- 超出文件大小限制（`MAXFILE * BSIZE`）时 `writei()` 返回错误，测试时注意文件大小上限。  
+- `balloc()` 遍历 bmap 并分配，若空间紧张会 panic（无回收策略）。  
+- `virtio_blk` 在不存在 virtio MMIO 时会 panic（当前代码在 probe 失败时直接 panic）。
 
-- 目前重点在进程管理，未启用 Lab4 的非法指令/访存异常测试。若需要，可在 `main.c` 中重新启用原先的 `trigger_*` 函数。
-- 性能层面主要通过观察 tick 与迭代计数验证调度响应时间；`worker_do_work()` 使用 `nop` 循环模拟不同耗时。
+## 7. 结论与后续工作
 
-### 3.4 典型输出
+本次 Lab7 完成了一个教学级别、功能完备的内核文件系统：支持 inode、直接/间接块、目录、文件读写、缓冲缓存与简化的日志。实现清晰且可扩展，为后续引入持久化设备支持、并发改进、文件系统检查（fsck）、以及用户态文件系统层打下了良好基础。
 
-```
-[TEST] test_process_creation
-[simple_task] pid=2 iteration=0
-...
-[producer] produced item #1 (buffer=1)
-[consumer] consumed item #1 (buffer=0)
-...
-[TEST] debug_proc_table
-  slot=0 pid=1 state=RUNNABLE name=proc-tests
-Spawned worker threads: fast=4 medium=5 slow=6
-[fast] hart=0 iter=0 ticks=1
-...
-```
+后续建议（按优先级）：
+- 将 `virtio_blk` 的探测与驱动调整为更健壮的错误处理或回退到 ramdisk。  
+- 为 bcache 与 icache 添加哈希索引以提升规模上的性能。  
+- 实现事务组合（真正的 log batching）以提高写入性能并支持断电恢复。  
+- 添加更多文件系统一致性测试（并发读写、崩溃恢复场景模拟）。
 
-## 4. 结论与展望
+---
+如果你希望我把本报告生成英文版本、补充性能测试脚本，或将 `kernel/boot/main.c` 中的演示扩展为可复现的测试用例，我可以继续实现这些内容。
 
-本次实验完成了内核层面的进程管理与调度框架，实现了抢占式轮转调度，并通过内置测试验证了关键功能。下一步可考虑：
+## 8. 思考题与答案
 
-- 引入 `sleep/wakeup`，将 `wait_process` 从忙等改为事件驱动；
-- 加入优先级或多级反馈队列，提升调度策略；
-- 扩展至用户态进程，接入系统调用、页表等更完整的 OS 功能。
+**1. 设计权衡：**
+*xv6的简单文件系统有什么优缺点？如何在简单性和性能之间平衡？*
+
+xv6 文件系统优点是结构极简，便于教学和理解，核心数据结构（超级块、inode、目录项、块映射）清晰，便于实现和调试。缺点是功能有限：不支持多级目录树、权限管理、持久化日志、并发优化等，性能瓶颈明显（如线性查找、固定大小缓存）。平衡方法是：在教学场景优先保证可读性和可维护性，实际系统可逐步引入哈希索引、B+树目录、动态缓存等提升性能。
+
+**2. 一致性保证：**
+*日志系统如何确保原子性？如果在恢复过程中再次崩溃会怎样？*
+
+日志系统通过“写前日志”机制，将所有即将修改的元数据和数据块先写入日志区，只有日志完整写入后才正式提交到主数据区。这样即使系统崩溃，只要日志完整，可以回放日志恢复一致状态。若在恢复过程中再次崩溃，理论上只要日志区未损坏，重启后仍可继续回放日志，保证原子性；但如果日志本身损坏，则可能需要更复杂的校验和或双日志区设计。
+
+**3. 性能优化：**
+*文件系统的主要性能瓶颈在哪里？如何改进目录查找的效率？*
+
+主要瓶颈包括：块设备访问延迟、buffer cache 命中率低、inode/目录项线性查找、日志写入频繁。目录查找效率可通过引入哈希表、B+树或红黑树等索引结构替代线性数组，支持快速定位和范围查询。现代文件系统如 ext4、NTFS 都采用树型或哈希索引加速目录操作。
+
+**4. 可扩展性：**
+*如何支持更大的文件和文件系统？现代文件系统有哪些先进特性？*
+
+支持更大文件可通过多级间接块（如双/三级间接）、动态 inode 分配、扩展超级块元数据等。更大文件系统则需支持动态块分配、分区管理、快照等。现代文件系统（如 ZFS、Btrfs、ext4）具备：写时复制（COW）、事务日志、在线校验与修复、快照、压缩、去重、分布式存储等高级特性。
+
+**5. 可靠性：**
+*如何检测和修复文件系统损坏？如何实现文件系统的在线检查？*
+
+检测损坏可通过 fsck 工具，遍历所有 inode、块、目录项，检查引用计数、块分配一致性、目录结构合法性。修复则包括回收孤立块、修正错误引用、重建目录树。在线检查可通过后台线程周期性扫描元数据、校验和比对、日志区一致性检查等方式实现，部分现代 FS 支持在线自愈和热修复。

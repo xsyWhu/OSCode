@@ -1,117 +1,59 @@
-## Lab6：系统调用 (Syscall)
+# Lab5：进程管理与调度
 
-- **环境与依赖**: 同 Lab5（交叉编译工具链 `riscv64-linux-gnu-*`、QEMU 等）。
-- **编译与运行**: 使用与 Lab5 相同的构建流程：
+## 1. 环境与依赖
+
+- Ubuntu/WSL2 + `riscv64-linux-gnu-*` 交叉编译工具链  
+- QEMU (virt, riscv64)  
+- 需已完成前置实验（内存管理、中断等）
+
+## 2. 编译与运行
 
 ```bash
-make
-make qemu
+make           # 构建 kernel-qemu
+make qemu      # 启动 QEMU (nographic)
 ```
 
-- **主要目标**: 实现一个最小的系统调用框架，包含系统调用号、从用户态到内核态的参数传递与返回值约定、若干基础系统调用实现，以及内核态测试用例来验证参数传递、安全性和性能。
+若需要清理：
 
-- **已实现的功能**:
-  - **系统调用号**：定义在 `include/syscall.h`（例如 `SYS_exit`, `SYS_getpid`, `SYS_write`）。
-  - **系统调用分发**：在 `kernel/proc/syscall.c` 中实现 `syscall()`，从当前进程的 `trapframe` 读取系统调用号（`a7`）和参数（`a0..a5`），并调用内核中的处理函数。
-  - **基本系统调用**：在 `kernel/proc/sysproc.c` 实现了 `sys_exit`, `sys_getpid`, `sys_write`（`write` 支持向 UART 输出，并做了用户内存拷贝与边界检查）。
-  - **用户态示例**：`kernel/proc/initcode.S` 演示了在用户态调用 `ecall` 触发 `SYS_write` 与 `SYS_exit`。
-  - **内核测试套件**：`kernel/boot/main.c` 中新增了 Lab6 的若干测试：
-    - `test_basic_syscalls`：验证 `getpid`/`write` 基本行为；
-    - `test_parameter_passing`：检查参数复制、错误参数处理；
-    - `test_security`：对越界/非法地址的拒绝；
-    - `test_syscall_performance`：测量系统调用开销（ticks）。
-
-- **设计要点**:
-  - **参数约定**：遵循 RISC‑V 约定，系统调用号放在 `a7`，参数通过 `a0..a5` 传递，返回值放回 `a0`。内核通过 `struct trapframe` 访问这些寄存器。 
-  - **安全检查**：在 `sys_write` 中使用 `copyin`/`copyout`（以及页表边界检查）确保内核不会读取用户态非法地址。
-  - **内核/用户边界**：`usertrap()` 在收到 `ecall`（scause == 8）时，先将 `sepc` 前移 4 字节，再打开中断并调用 `syscall()` 来执行分发。
-
-- **后续扩展建议**:
-  - 增加更多系统调用（`open/read/close/fork/exec/wait` 等），以及基于文件描述符的 I/O 子系统；
-  - 引入用户态同步/阻塞机制（阻塞 `read`、睡眠/唤醒）；
-  - 将 `sys_write` 扩展为支持字符设备/文件系统。
-
-> 注：更多实现细节见 `kernel/proc/syscall.c`、`kernel/proc/sysproc.c` 与 `kernel/boot/main.c` 的 Lab6 测试段。
-## 2. 代码框架
-
-以下是本次 Lab6 的代码目录结构（简化视图）：
-
-```
-whu-oslab-lab6/
-├── LICENSE
-├── Makefile
-├── common.mk
-├── README.md
-├── Report.md
-├── Report_complete.md
-├── kernel.bin
-├── .gdbinit.tmpl-riscv
-├── .gitignore
-├── .vscode/
-│   ├── launch.json
-│   ├── settings.json
-│   └── tasks.json
-├── picture/
-│   ├── test1_map.png
-│   ├── test2_unmap.png
-│   ├── test3_5_alloc&free.png
-│   └── test4_Align.png
-├── include/
-│   ├── common.h
-│   ├── memlayout.h
-│   ├── riscv.h
-│   ├── syscall.h
-│   ├── dev/
-│   │   ├── console.h
-│   │   ├── plic.h
-│   │   └── uart.h
-│   ├── mem/
-│   │   ├── pmem.h
-│   │   └── vmem.h
-│   ├── proc/
-│   │   ├── cpu.h
-│   │   ├── proc.h
-│   │   └── trapframe.h
-│   └── lib/
-│       ├── lock.h
-│       ├── print.h
-│       └── string.h
-├── kernel/
-│   ├── Makefile
-│   ├── kernel.ld
-│   ├── boot/
-│   │   ├── Makefile
-│   │   ├── entry.S
-│   │   ├── main.c
-│   │   └── start.c
-│   ├── dev/
-│   │   ├── Makefile
-│   │   ├── console.c
-│   │   ├── plic.c
-│   │   ├── timer.c
-│   │   └── uart.c
-│   ├── lib/
-│   │   ├── Makefile
-│   │   ├── print.c
-│   │   ├── spinlock.c
-│   │   └── string.c
-│   ├── mem/
-│   │   ├── Makefile
-│   │   ├── pmem.c
-│   │   └── vmem.c
-│   ├── proc/
-│   │   ├── Makefile
-│   │   ├── initcode.S
-│   │   ├── proc.c
-│   │   ├── swtch.S
-│   │   ├── syscall.c
-│   │   └── sysproc.c
-│   └── trap/
-│       ├── Makefile
-│       ├── trap.S
-│       ├── trampoline.S
-│       └── trap_kernel.c
-└── (其他文档/二进制/源码)
+```bash
+make clean
 ```
 
-说明：上面的树状结构为简化视图，实际仓库中每个目录下还有一些辅助的头文件、编译产物和 `Makefile` 依赖文件。
+> 注意：在某些受限环境中编译可能因 `/tmp` 权限报错，可通过 `export TMPDIR=$PWD/tmp` 等方式调整。
+
+## 3. 主要特性
+
+- **内核线程调度**：`create_process()` 支持创建最多 `NPROC` 个内核线程，`scheduler()` 采用轮转策略，时钟中断驱动 `yield()` 实现抢占。
+- **进程生命周期**：完成 `exit_process()`、`wait_process()`、内核栈分配/释放等逻辑。
+- **测试驱动**：`run_all_tests()` 进程依次执行 `test_process_creation`、`test_scheduler`、`test_synchronization`、`debug_proc_table`，最后启动 worker demo。
+- **同步原语**：使用自旋锁实现生产者-消费者测试，验证进程间协作。
+
+## 4. 目录说明
+
+```
+kernel/
+  boot/main.c          # 启动 & 测试驱动
+  proc/proc.c          # 进程管理与调度
+  proc/swtch.S         # 上下文切换汇编
+  trap/trap_kernel.c   # 中断/异常处理
+include/
+  proc/proc.h          # 进程/CPU 结构定义
+  lib/...              # 工具库、锁、字符串等
+Report.md              # 实验报告
+README.md              # 本文件
+```
+
+## 5. 常见问题
+
+1. **`exit_process` 报告“noreturn function does return”**  
+   - 已在实现中通过死循环/`panic` 保证不返回；若自己修改需保持 `noreturn` 语义。
+2. **QEMU 无输出或只显示 Hart1 idle**  
+   - Hart1 设计为 idle，调度仅在 Hart0 进行；请查看 Hart0 的日志。
+3. **编译时 `unused-but-set-variable`**  
+   - 使用 `-Werror` 时必须移除未使用变量或将其 `__attribute__((unused))`。
+
+## 6. 后续扩展建议
+
+- 实现 `sleep/wakeup`，让 `wait_process` 不再忙等。
+- 支持优先级/多级反馈队列等调度算法。
+- 引入用户态地址空间与系统调用，完成从 kernel thread 到 user process 的过渡。

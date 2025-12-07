@@ -1,35 +1,27 @@
 #include "lib/string.h"
 #include "lib/print.h"
+#include "lib/lock.h"
 #include "mem/pmem.h"
 #include "mem/vmem.h"
-#include "proc/proc.h"
-#include "proc/trapframe.h"
 #include "memlayout.h"
+#include "proc/proc.h"
 #include "trap/trap.h"
 #include "riscv.h"
 
 extern void swtch(struct context *old, struct context *new);
 extern char trampoline[];
-extern char uservec[];
-extern char userret[];
-extern char initcode_start[];
-extern char initcode_end[];
-extern void kernel_vector(void);
-void syscall(void);
 
 struct proc proc_table[NPROC];
 struct cpu cpus[NCPU];
 
 static int next_pid = 1;
 static int proc_initialized = 0;
+static spinlock_t proc_table_lock;
+static spinlock_t pid_lock;
 
 static struct proc* alloc_process(void (*entry)(void), const char *name);
-static int alloc_trapframe(struct proc *p);
-static pgtbl_t proc_pagetable(struct proc *p);
-static void proc_freepagetable(struct proc *p);
 static void free_process(struct proc *p);
 static void proc_trampoline(void) __attribute__((noreturn));
-static int handle_device_interrupt(uint64 scause);
 
 int mycpuid(void)
 {
@@ -54,9 +46,15 @@ void proc_init(void)
 
     memset(proc_table, 0, sizeof(proc_table));
     memset(cpus, 0, sizeof(cpus));
+    spinlock_init(&proc_table_lock, "proc_table");
+    spinlock_init(&pid_lock, "pid_lock");
 
     for (int i = 0; i < NCPU; i++) {
         cpus[i].id = i;
+    }
+    for (int i = 0; i < NPROC; i++) {
+        spinlock_init(&proc_table[i].lock, "proc");
+        proc_table[i].state = PROC_UNUSED;
     }
 
     next_pid = 1;
@@ -67,26 +65,36 @@ static struct proc* alloc_process(void (*entry)(void), const char *name)
 {
     struct proc *p = 0;
 
+    spinlock_acquire(&proc_table_lock);
     for (int i = 0; i < NPROC; i++) {
         if (proc_table[i].state == PROC_UNUSED) {
             p = &proc_table[i];
+            spinlock_acquire(&p->lock);
+            p->state = PROC_USED;
             break;
         }
     }
+    spinlock_release(&proc_table_lock);
 
     if (!p)
         return 0;
 
-    memset(p, 0, sizeof(*p));
-
+    spinlock_acquire(&pid_lock);
     p->pid = next_pid++;
-    p->state = PROC_RUNNABLE;
+    spinlock_release(&pid_lock);
+
     p->entry = entry;
     p->parent = myproc();
-    p->sz = 0;
-    p->pagetable = NULL;
-    p->tf = NULL;
+    p->exit_code = 0;
     p->killed = 0;
+    p->chan = 0;
+    p->sz = 0;
+    p->pagetable = 0;
+    p->trapframe = 0;
+    p->name[0] = '\0';
+    for (int i = 0; i < NOFILE; i++) {
+        p->ofile[i] = 0;
+    }
 
     if (name && *name) {
         strncpy(p->name, name, sizeof(p->name) - 1);
@@ -95,17 +103,35 @@ static struct proc* alloc_process(void (*entry)(void), const char *name)
 
     void *stack_page = pmem_alloc(true);
     if (!stack_page) {
-        memset(p, 0, sizeof(*p));
+        p->pid = 0;
+        p->parent = 0;
+        p->entry = 0;
+        p->state = PROC_UNUSED;
+        spinlock_release(&p->lock);
         return 0;
     }
 
     p->kstack = (uint64)stack_page;
 
+    struct trapframe *tf_page = (struct trapframe*)pmem_alloc(true);
+    if (!tf_page) {
+        pmem_free(p->kstack, true);
+        p->kstack = 0;
+        p->pid = 0;
+        p->parent = 0;
+        p->entry = 0;
+        p->state = PROC_UNUSED;
+        spinlock_release(&p->lock);
+        return 0;
+    }
+    memset(tf_page, 0, PGSIZE);
+    p->trapframe = tf_page;
+
     memset(&p->ctx, 0, sizeof(p->ctx));
     p->ctx.sp = p->kstack + PGSIZE;
     p->ctx.ra = (uint64)proc_trampoline;
 
-    return p;
+    return p; // lock held
 }
 
 int create_process(void (*entry)(void), const char *name)
@@ -120,7 +146,10 @@ int create_process(void (*entry)(void), const char *name)
     if (!p)
         return -1;
 
-    return p->pid;
+    p->state = PROC_RUNNABLE;
+    int pid = p->pid;
+    spinlock_release(&p->lock);
+    return pid;
 }
 
 void exit_process(int status)
@@ -129,8 +158,13 @@ void exit_process(int status)
     if (!p)
         panic("exit_process: no current process");
 
+    spinlock_acquire(&p->lock);
     p->exit_code = status;
     p->state = PROC_ZOMBIE;
+    spinlock_release(&p->lock);
+
+    if (p->parent)
+        wakeup(p->parent);
 
     struct cpu *c = mycpu();
     swtch(&p->ctx, &c->ctx);
@@ -147,6 +181,7 @@ int wait_process(int *status)
     if (!cur)
         return -1;
 
+    spinlock_acquire(&proc_table_lock);
     for (;;) {
         int have_child = 0;
 
@@ -157,6 +192,7 @@ int wait_process(int *status)
                 continue;
 
             have_child = 1;
+            spinlock_acquire(&p->lock);
             if (p->state == PROC_ZOMBIE) {
                 int pid = p->pid;
 
@@ -164,15 +200,113 @@ int wait_process(int *status)
                     *status = p->exit_code;
 
                 free_process(p);
+                spinlock_release(&p->lock);
+                spinlock_release(&proc_table_lock);
                 return pid;
             }
+            spinlock_release(&p->lock);
         }
 
-        if (!have_child)
+        if (!have_child) {
+            spinlock_release(&proc_table_lock);
             return -1;
+        }
 
-        yield();
+        sleep(cur, &proc_table_lock);
     }
+}
+
+int kill_process(int pid)
+{
+    for (int i = 0; i < NPROC; i++) {
+        struct proc *p = &proc_table[i];
+        spinlock_acquire(&p->lock);
+        if (p->state != PROC_UNUSED && p->pid == pid) {
+            p->killed = 1;
+            if (p->state == PROC_SLEEPING) {
+                p->state = PROC_RUNNABLE;
+            }
+            spinlock_release(&p->lock);
+            return 0;
+        }
+        spinlock_release(&p->lock);
+    }
+    return -1;
+}
+
+void userinit(void)
+{
+    struct proc *p = alloc_process(NULL, "init");
+    if (!p) {
+        panic("userinit: alloc_process failed");
+    }
+
+    const char *argv[] = { "init", NULL };
+    if (exec_process(p, "/init", argv) < 0) {
+        spinlock_release(&p->lock);
+        panic("userinit: exec_process failed");
+    }
+
+    for (int fd = 0; fd < NOFILE && fd < 3; fd++) {
+        struct file *f = filealloc();
+        if (!f) {
+            panic("userinit: filealloc");
+        }
+        f->type = FD_CONSOLE;
+        f->readable = 1;
+        f->writable = 1;
+        p->ofile[fd] = f;
+    }
+    p->state = PROC_RUNNABLE;
+
+    spinlock_release(&p->lock);
+}
+
+int fork_process(void)
+{
+    struct proc *p = myproc();
+    if (!p || !p->pagetable) {
+        return -1;
+    }
+
+    struct proc *np = alloc_process(NULL, p->name);
+    if (!np) {
+        return -1;
+    }
+
+    np->parent = p;
+    np->sz = p->sz;
+
+    np->pagetable = proc_pagetable(np);
+    if (!np->pagetable) {
+        free_process(np);
+        spinlock_release(&np->lock);
+        return -1;
+    }
+
+    if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
+        proc_freepagetable(np->pagetable, np->sz);
+        np->pagetable = 0;
+        free_process(np);
+        spinlock_release(&np->lock);
+        return -1;
+    }
+
+    memcpy(np->trapframe, p->trapframe, sizeof(*p->trapframe));
+    np->trapframe->a0 = 0;
+
+    for (int i = 0; i < NOFILE; i++) {
+        if (p->ofile[i]) {
+            np->ofile[i] = filedup(p->ofile[i]);
+        } else {
+            np->ofile[i] = 0;
+        }
+    }
+
+    np->state = PROC_RUNNABLE;
+    int pid = np->pid;
+    spinlock_release(&np->lock);
+    return pid;
 }
 
 void yield(void)
@@ -183,7 +317,9 @@ void yield(void)
     if (!p)
         return;
 
+    spinlock_acquire(&p->lock);
     p->state = PROC_RUNNABLE;
+    spinlock_release(&p->lock);
     swtch(&p->ctx, &c->ctx);
 }
 
@@ -198,11 +334,15 @@ void scheduler(void)
         for (int i = 0; i < NPROC; i++) {
             struct proc *p = &proc_table[i];
 
-            if (p->state != PROC_RUNNABLE)
+            spinlock_acquire(&p->lock);
+            if (p->state != PROC_RUNNABLE) {
+                spinlock_release(&p->lock);
                 continue;
+            }
 
             c->proc = p;
             p->state = PROC_RUNNING;
+            spinlock_release(&p->lock);
 
             swtch(&c->ctx, &p->ctx);
 
@@ -211,196 +351,135 @@ void scheduler(void)
     }
 }
 
-static void proc_trampoline(void)
+void sleep(void *chan, spinlock_t *lk)
 {
     struct proc *p = myproc();
-    if (!p)
-        panic("proc_trampoline: no proc");
+    if (!p || !lk)
+        panic("sleep: invalid args");
 
-    if (p->entry) {
-        p->entry();
-        exit_process(0);
+    spinlock_acquire(&p->lock);
+    spinlock_release(lk);
+    p->chan = chan;
+    p->state = PROC_SLEEPING;
+
+    spinlock_release(&p->lock);
+    swtch(&p->ctx, &mycpu()->ctx);
+
+    spinlock_acquire(&p->lock);
+    p->chan = 0;
+    spinlock_release(&p->lock);
+    spinlock_acquire(lk);
+}
+
+void wakeup(void *chan)
+{
+    for (int i = 0; i < NPROC; i++) {
+        struct proc *p = &proc_table[i];
+
+        spinlock_acquire(&p->lock);
+        if (p->state == PROC_SLEEPING && p->chan == chan) {
+            p->chan = 0;
+            p->state = PROC_RUNNABLE;
+        }
+        spinlock_release(&p->lock);
+    }
+}
+
+pagetable_t proc_pagetable(struct proc *p)
+{
+    pagetable_t pagetable = uvmcreate();
+    if (pagetable == NULL) {
+        return NULL;
     }
 
-    usertrapret();
-    __builtin_unreachable();
-}
-
-static int alloc_trapframe(struct proc *p)
-{
-    if (p->tf)
-        return 0;
-    void *page = pmem_alloc(true);
-    if (!page)
-        return -1;
-    memset(page, 0, PGSIZE);
-    p->tf = (struct trapframe*)page;
-    return 0;
-}
-
-static pgtbl_t proc_pagetable(struct proc *p)
-{
-    pgtbl_t pagetable = uvm_create();
-    if (!pagetable)
-        return NULL;
-
-    // Map trampoline (shared text).
+    // Map trampoline
     vm_mappages(pagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
-
-    // Map per-process trapframe page.
-    vm_mappages(pagetable, TRAPFRAME, (uint64)p->tf, PGSIZE, PTE_R | PTE_W);
+    // Map trapframe
+    vm_mappages(pagetable, TRAPFRAME, (uint64)p->trapframe, PGSIZE, PTE_R | PTE_W);
 
     return pagetable;
 }
 
-static void proc_freepagetable(struct proc *p)
+void proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
-    if (!p->pagetable)
+    if (pagetable == NULL) {
         return;
-    vm_unmappages(p->pagetable, TRAMPOLINE, PGSIZE, false);
-    vm_unmappages(p->pagetable, TRAPFRAME, PGSIZE, false);
-    uvm_free(p->pagetable, p->sz);
-    p->pagetable = NULL;
+    }
+    vm_unmappages(pagetable, TRAMPOLINE, PGSIZE, false);
+    vm_unmappages(pagetable, TRAPFRAME, PGSIZE, false);
+    uvmfree(pagetable, sz);
+}
+
+int growproc(int n)
+{
+    struct proc *p = myproc();
+    if (!p || !p->pagetable) {
+        return -1;
+    }
+
+    uint64 sz = p->sz;
+    if (n > 0) {
+        uint64 newsz = sz + (uint64)n;
+        uint64 res = uvmalloc(p->pagetable, sz, newsz);
+        if (res == 0) {
+            return -1;
+        }
+        p->sz = res;
+    } else if (n < 0) {
+        uint64 decr = (uint64)(-n);
+        uint64 target = (decr > sz) ? 0 : sz - decr;
+        uint64 res = uvmdealloc(p->pagetable, sz, target);
+        p->sz = res;
+    }
+    return 0;
 }
 
 static void free_process(struct proc *p)
 {
-    if (p->pagetable)
-        proc_freepagetable(p);
-
-    if (p->tf) {
-        pmem_free((uint64)p->tf, true);
-        p->tf = NULL;
-    }
+    if (!p)
+        return;
 
     if (p->kstack) {
         pmem_free(p->kstack, true);
         p->kstack = 0;
     }
 
-    memset(p, 0, sizeof(*p));
+    if (p->trapframe) {
+        pmem_free((uint64)p->trapframe, true);
+        p->trapframe = 0;
+    }
+
+    if (p->pagetable) {
+        proc_freepagetable(p->pagetable, p->sz);
+        p->pagetable = 0;
+    }
+
+    for (int i = 0; i < NOFILE; i++) {
+        if (p->ofile[i]) {
+            fileclose(p->ofile[i]);
+            p->ofile[i] = 0;
+        }
+    }
+
+    p->pid = 0;
+    p->parent = 0;
+    p->exit_code = 0;
+    p->killed = 0;
+    p->chan = 0;
+    p->entry = 0;
+    p->name[0] = '\0';
     p->state = PROC_UNUSED;
 }
 
-void usertrap(void)
+static void proc_trampoline(void)
 {
     struct proc *p = myproc();
-    if (!p)
-        panic("usertrap: no process");
-    if (!p->tf || !p->pagetable)
-        panic("usertrap: no trapframe/pagetable");
-
-    uint64 sstatus = r_sstatus();
-    if (sstatus & SSTATUS_SPP) {
-        panic("usertrap: not from user mode");
-    }
-
-    // 切换到内核 trap 向量，避免嵌套时仍走 trampoline
-    w_stvec((uint64)kernel_vector);
-
-    uint64 scause = r_scause();
-    p->tf->epc = r_sepc();
-
-    if (scause == 8) {
-        // 系统调用
-        if (p->killed)
-            exit_process(-1);
-
-        p->tf->epc += 4;
-        intr_on();
-        syscall();
-    } else if (handle_device_interrupt(scause)) {
-        // 已处理（例如时钟/外设中断）
+    if (p && p->entry) {
+        p->entry();
     } else {
-        printf("usertrap: unexpected scause=%p stval=%p pid=%d\n",
-               scause, r_stval(), p->pid);
-        p->killed = 1;
+        usertrapret();
     }
 
-    if (p->killed)
-        exit_process(-1);
-
-    usertrapret();
-}
-
-void usertrapret(void)
-{
-    struct proc *p = myproc();
-    if (!p)
-        panic("usertrapret: no process");
-
-    intr_off();
-
-    // 设置 trap 向量指向 trampoline 的 uservec
-    uint64 trampoline_uservec = TRAMPOLINE + (uint64)(uservec - trampoline);
-    w_stvec(trampoline_uservec);
-
-    // 准备 trapframe 中的内核上下文信息
-    p->tf->kernel_satp = MAKE_SATP(kernel_pagetable_get());
-    p->tf->kernel_sp = p->kstack + PGSIZE;
-    p->tf->kernel_trap = (uint64)usertrap;
-    p->tf->kernel_hartid = mycpuid();
-
-    // 允许用户态中断
-    uint64 sstatus = r_sstatus();
-    sstatus &= ~SSTATUS_SPP;   // 下一次 sret 返回到用户态
-    sstatus |= SSTATUS_SPIE;   // 使能用户态中断
-    w_sstatus(sstatus);
-
-    w_sepc(p->tf->epc);
-
-    uint64 satp = MAKE_SATP(p->pagetable);
-    uint64 fn = TRAMPOLINE + (uint64)(userret - trampoline);
-    ((void (*)(uint64, uint64))fn)(TRAPFRAME, satp);
+    exit_process(0);
     __builtin_unreachable();
-}
-
-void userinit(void)
-{
-    struct proc *p = alloc_process(NULL, "init");
-    if (!p)
-        panic("userinit: alloc_process failed");
-
-    if (alloc_trapframe(p) < 0)
-        panic("userinit: alloc trapframe failed");
-
-    p->pagetable = proc_pagetable(p);
-    if (!p->pagetable)
-        panic("userinit: pagetable failed");
-
-    uint64 init_len = (uint64)(initcode_end - initcode_start);
-    uint64 alloc_sz = PG_ROUND_UP(init_len);
-
-    uint64 sz = uvm_alloc(p->pagetable, 0, alloc_sz);
-    if (sz == 0)
-        panic("userinit: uvm_alloc failed");
-    p->sz = sz;
-
-    if (uvm_load(p->pagetable, 0, (uint8*)initcode_start, init_len) < 0)
-        panic("userinit: uvm_load failed");
-
-    p->tf->epc = 0;
-    p->tf->sp = alloc_sz;
-    p->parent = NULL;
-    p->state = PROC_RUNNABLE;
-}
-
-static int handle_device_interrupt(uint64 scause)
-{
-    if ((scause & (1UL << 63)) == 0)
-        return 0;
-
-    uint64 sip = r_sip();
-    if (sip & SIE_SSIE) {
-        w_sip(sip & ~SIE_SSIE);
-        timer_interrupt_handler();
-        return 1;
-    }
-
-    if (sip & SIE_SEIE) {
-        external_interrupt_handler();
-        return 1;
-    }
-
-    return 0;
 }

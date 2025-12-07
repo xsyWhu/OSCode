@@ -1,146 +1,140 @@
-# 综合实验报告 — 进程管理、调度 与 系统调用（Lab5 & Lab6 总结）
+# 综合实验报告lab5 —— 进程管理与调度
 
-本报告按要求整理为三大部分：系统设计、实验过程与实现记录、测试验证。文中同时覆盖 Lab5 的进程调度实现与 Lab6 的最小系统调用框架实现，包含设计说明、关键数据结构、实现细节、测试结果及思考题回答。
+## **系统设计**
 
-**说明**：涉及的源文件主要包括 `kernel/proc/proc.c`、`kernel/proc/syscall.c`、`kernel/proc/sysproc.c`、`kernel/proc/initcode.S`、`kernel/boot/main.c`、`kernel/trap/trap_kernel.c` 等。
+- **架构设计说明**：
+  - 项目实现为内核级“内核线程”调度子系统，主要模块及职责：
+    - **`kernel/proc/proc.c`**：进程表、PID 分配、进程生命周期（创建、运行、退出、回收）、调度器 `scheduler()`。
+    - **`kernel/proc/swtch.S`**：保存/恢复寄存器的上下文切换汇编实现（`s0~s11`, `ra`, `sp` 等）。
+    - **`kernel/trap/trap_kernel.c`**：时钟中断处理，递增 `ticks` 并在 Hart0 上触发 `yield()` 实现抢占。
+    - **`kernel/boot/main.c`**：引导与测试驱动，启动内置测试进程 `run_all_tests()` 并在测试后启动 worker demo。
 
----
+- **关键数据结构**：
+  - `struct context` (`include/proc/proc.h`): 保存上下文寄存器，用于 `swtch()` 的保存与恢复。
+  - `enum proc_state` (`include/proc/proc.h`): 进程状态集合：`UNUSED`, `SLEEPING`, `RUNNABLE`, `RUNNING`, `ZOMBIE`。
+  - `struct proc` (`include/proc/proc.h`): 记录 PID、父进程指针、进程名、内核栈基址、`struct context`、退出码等元数据。
+  - `struct cpu` (`include/proc/proc.h`): 每个 hart 的当前进程与调度器上下文（`cpu.ctx`），支持 `mycpu()` / `myproc()`。
+  - `proc_table[NPROC]` (`kernel/proc/proc.c`): 固定大小的进程表，调度通过线性扫描查找 `RUNNABLE` 条目。
 
-## 系统设计部分
+- **与 xv6 对比分析**：
+  - 功能范围：本实现聚焦于内核线程（kernel threads），不涉及用户态地址空间、系统调用、文件系统等；因此实现更精简。
+  - 调度策略：采用与 xv6 类似的简单轮转（round-robin）策略，遍历 `proc_table` 寻找 `RUNNABLE` 进程并切换。
+  - 抢占机制：通过时钟中断驱动 `yield()`，与 xv6 的抢占模型基本一致，但本实验在设计上仅在 Hart0 上维护 tick 和主要调度逻辑，Hart1 做 idle 处理以简化实验观察。
 
-### 架构设计说明
+- **设计决策理由**：
+  - 先实现内核线程（kernel threads），确保上下文切换与抢占正确，再扩展到用户态，降低实现复杂度与调试成本。
+  - 将 tick 更新与主要调度逻辑集中在 Hart0，便于观测与复现调度行为（实验平台为多 hart，但以单 hart 调度为主）。
+  - 集成测试驱动 `run_all_tests()`，通过进程形式依次运行测试用例，确保实现的可验证性与复现性。
 
-- 进程子系统：`kernel/proc/proc.c` 管理进程生命周期（`alloc_process/create_process/exit_process/wait_process`）、内核栈分配、上下文与调度。调度器使用简单轮转（round-robin），由 `scheduler()` 在可运行进程间切换。
-- 中断与计时器：`kernel/trap/trap_kernel.c` 提供 trap 向量与外设中断处理，CLINT 提供的时钟中断驱动 `timer_interrupt_handler()` 在 Hart0 上更新 ticks 并触发抢占（调用 `yield()`）。
-- 用户/内核边界与系统调用（Lab6）：用户通过 `ecall` 进入内核（`usertrap()` 处理 scause==8），内核在 `kernel/proc/syscall.c` 中根据 `a7` 分发到 `sys_*` 实现（如 `sys_getpid`, `sys_write`, `sys_exit`）。参数通过 `a0..a5` 传递，返回值放回 `a0`。
+## **实验过程**
 
-### 关键数据结构
+- **实现步骤记录**：
+  1. 在 `include/proc/proc.h` 中定义并校准 `struct context`、`struct proc`、`struct cpu`，保证与 `swtch.S` 的寄存器保存顺序一致。
+  2. 在 `kernel/proc/proc.c` 中实现基本接口：`proc_init()`、`alloc_proc()`/`create_process()`、`exit_process()`、`wait_process()`、`yield()`、`scheduler()`。
+  3. 在 `kernel/trap/trap_kernel.c` 中的时钟中断处理里调用 `timer_update()` 并在 Hart0 上触发 `yield()`，实现抢占。
+  4. 在 `kernel/boot/main.c` 中实现 `run_all_tests()`，包含 `test_process_creation`、`test_scheduler`、`test_synchronization`、`debug_proc_table` 等测试函数，测试通过后启动三个 worker（fast/medium/slow）进行演示。
+  5. 调整日志与打印频率，避免输出刷屏，加入 `[TEST]` 前缀便于日志过滤。
 
-- `struct context` (`include/proc/proc.h`)：保存 `ra/sp` 与 callee-saved 寄存器，与汇编 `swtch.S` 协作。
-- `struct proc` (`include/proc/proc.h`)：PID、状态（RUNNABLE/RUNNING/...）、内核栈地址、trapframe 指针、页表、父进程指针、退出码等。
-- `struct cpu` (`include/proc/proc.h`)：每个 hart 的当前进程和内核上下文（`cpu.ctx`）用于在调度器与进程间切换。
-- `pgtbl_t`/页表：用户进程的页表由 `uvm_create/uvm_load` 管理，`proc_pagetable()` 在创建时映射 trampoline 与 trapframe 页面。
+- **遇到的问题与解决方案**：
+  - `exit_process` 被标注为 `noreturn`，但编译器仍报“noreturn function does return”：在 `panic()` 后加入死循环以保证控制流不返回。
+  - 测试与 demo 输出过多导致难以阅读：在 worker 中使用 `last_report` 控制打印频率（例如每 100 次迭代打印一次），并为测试添加统一前缀。
+  - `-Werror` 下因未使用变量导致编译失败：移除或标注未使用变量（或使用 `__attribute__((unused))`）以消除警告。
 
-### 与 xv6 对比分析
+- **源码理解总结**：
+  - `swtch()`（`kernel/proc/swtch.S`）负责保存当前进程的一组 callee-saved 寄存器并加载目标进程寄存器，C 代码只需维护 `struct context`。
+  - `scheduler()` 作为每个 `cpu` 的内核调度循环（在 `cpu.ctx` 上运行），通过遍历 `proc_table` 寻找 `RUNNABLE` 进程并调用 `swtch()` 切换到该进程；进程返回后由 `scheduler()` 继续循环。
+  - 新进程通过 `proc_trampoline()` 或类似的入口统一执行传入函数，函数返回后调用 `exit_process()` 完成清理与回收。
 
-- 相同点：两者均使用简单轮转调度、中断驱动抢占和 trapframe 保存/恢复用户态寄存器以支持系统调用与异常处理。
-- 不同点：本实现范围更小（起初只实现内核线程），Lab6 才加入最小 syscall 支持；尚未实现完整文件系统、复杂权限模型或用户态丰富系统调用集合。
+## **测试与验证**
 
-### 设计决策理由
+- **功能测试结果（概要）**：
+  - `test_process_creation`：成功创建并回收多个 `simple_task`，PID 分配与回收正常；日志显示进程创建、运行、退出序列。
+  - `test_scheduler`：不同 CPU 工作强度任务（fast/medium/slow）在 Hart0 上被轮流调度，时钟中断能触发抢占切换。
+  - `test_synchronization`：使用 `spinlock` 实现的生产者-消费者测试通过，`produced_total == consumed_total`。
+  - `debug_proc_table`：可以打印进程表中每个 slot 的状态（`UNUSED`/`RUNNABLE`/`RUNNING`/`ZOMBIE`），用于确认进程生命周期转换正确。
 
-- 先实现 kernel thread 与上下文切换，确保调度机制正确后再扩展用户态与 syscall，可降低实现复杂度并便于定位问题。
-- 只在 Hart0 执行调度并更新 tick、让其他 hart 进入 idle，简化多核同步问题，便于教学演示。
-- 在 syscall 设计上采用最小原则：内核提供必要且可验证的原语（write/getpid/exit），由用户态库负责更高级组合。
+- **性能数据（采集方法与占位）**：
+  - 采集方法：在 QEMU 中运行 `make qemu`（或 `make qemu-gdb`），观察内置测试日志并记录各 worker 的 `iter` 与 `ticks` 值；也可在 `worker_body()` 中增加统计变量并在结束时打印汇总。
+  - 推荐命令：
+    ```bash
+    make
+    make qemu         # or `make qemu-gdb` for debugging
+    ```
+  - 占位数据（请在真实运行后替换）：
+    - 测试运行耗时（wall-clock）: <待测量> 秒
+    - 平均调度切换间隔（ticks）: <待测量> ticks
+    - worker iterations（运行 10s 取样）: fast=<待测量>, medium=<待测量>, slow=<待测量>
 
----
+- **异常测试**：
+  - 本实验以进程调度为主，未对非法指令/访存异常做深入测试；如需运行，请在 `kernel/boot/main.c` 中恢复 Lab4 的触发函数（`trigger_illegal_instruction()` 等），并观察内核对异常的处理路径。
 
-## 实验过程部分
+- **运行截图 / 录屏（说明与占位）**：
+  - 建议截图点：
+    - `run_all_tests()` 开始时显示的 `[TEST]` 标记日志。
+    - `debug_proc_table` 输出展示的进程表快照。
+    - worker demo 运行中不同 `fast/medium/slow` 输出的对比。
+  - 在 QEMU（nographic）模式下，可将输出重定向到文件并用终端截屏（示例）：
+    ```bash
+    make
+    make qemu | tee qemu-output.log
+    # 然后在宿主机上截图 qemu-output.log 的关键部分或录屏终端窗口
+    ```
+  - 占位：请将生成的截图/录屏文件放到 `picture/` 目录并在此处列出文件名，例如：`picture/test_creation.png`, `picture/proc_table.png`。
 
-### 实现步骤记录
+## **结论与后续工作**
 
-1. 初始化与数据结构：补全 `struct proc/struct cpu/struct context`，实现 `proc_init()`。
-2. 进程管理：实现 `alloc_process()`、`create_process()`、`proc_trampoline()`、`exit_process()`、`wait_process()` 等核心函数。
-3. 上下文切换：引入/使用 `swtch()`（汇编），并在 `yield()` 与 `scheduler()` 中调用以切换进程与调度器上下文。
-4. 中断/时钟：实现 `trap_init()`、`trap_inithart()`、`timer_interrupt_handler()`；在 `usertrap()`/`trap_kernel_handler()` 中分发中断与异常。
-5. 用户态启动与 syscall 路径：`userinit()` 加载 `initcode.S` 到用户进程地址空间；实现 `include/syscall.h`、`kernel/proc/syscall.c`、`kernel/proc/sysproc.c`，并在 `usertrap()` 检测 `ecall` 后调用 `syscall()`。
-6. 测试：在 `kernel/boot/main.c` 添加 `run_all_tests()`，包括进程创建、调度、同步以及 syscall 的参数/安全/性能测试。
-
-### 问题与解决方案
-
-- `exit_process` noreturn 语义：在 `exit_process` 调用 `panic()` 后加死循环，防止函数返回。
-- 输出过多导致日志混乱：在 `worker_body()` 中使用 `last_report` 控制打印频率。
-- 用户内存访问安全问题：`sys_write` 使用 `copyin`、分批复制缓冲区并检查 fd、len 范围以防止越界访问。
-- `wait_process` 仍为忙等：目前使用 `yield()` 让出 CPU，后续建议实现 `sleep/wakeup` 改为阻塞式等待以节省 CPU。
-
-### 源码理解总结
-
-- `swtch()` 与 `struct context`：负责保存/恢复内核态寄存器与栈指针，使 C 层不必直接操作寄存器。
-- `trapframe`：保存用户态寄存器，内核通过该结构获取系统调用参数并在返回时恢复用户态执行上下文。
-- `trampoline` 与 `userret`：统一处理从内核返回用户态时的页表切换和 sret 返回序列。
-
----
-
-## 测试验证部分
-
-### 功能测试结果
-
-- `test_process_creation`：成功创建并回收多个 `simple_task`，进程生命周期流程正常。
-- `test_scheduler`：运行多个 `cpu_task`，通过任务输出和 ticks 观察到轮转执行，表示抢占有效。
-- `test_synchronization`：生产者/消费者示例在自旋锁保护下运行完毕，`produced_total == consumed_total`。
-- Lab6 `syscall` 测试：`initcode.S` 的 `Hello from user mode!` 通过 `SYS_write` 输出；`SYS_getpid` 返回一致的 PID；对非法 fd/指针/长度的 `write` 返回 -1，且不会导致内核 panic。
-
-### 性能数据（测量说明与占位）
-
-- `test_syscall_performance` 在 `kernel/boot/main.c` 中测量了多次 `getpid()` 的 ticks 耗时（通过 timer_get_ticks 输出）。
-- 由于不同宿主/模拟器环境的差异，建议在你的 QEMU 环境中运行并记录数值。运行建议命令：
-
-```bash
-make
-make qemu
-```
-
-- 请将测试输出中关于 `test_syscall_performance` 的行（例如 "1000 getpid() calls took X ticks"）粘贴到本报告中以补齐性能数据。
-
-### 异常测试
-
-- 内核异常：`trap_kernel_handler()` 在遇到非法指令或页错误时会打印信息并 `panic()`，当前实现避免内核态触发此类异常。
-- 用户态异常与安全边界：`usertrap()` 会在无法识别的异常中将进程标记为被 kill，并由进程退出；`sys_write` 对非法参数返回错误码，验证了内核对用户内存访问的防护。
-
-### 运行截图/录屏（占位）
-
-- 建议截图：
-  - QEMU 启动日志（包含 `run_all_tests()` 的输出）；
-  - syscall 测试输出段；
-  - producer/consumer 运行片段；
-  - worker demo 的部分输出。
-
-- 占位：请将截图放在仓库的 `picture/` 目录并在此处列出文件名，我可以在报告中嵌入对应路径。
+- 实验达成：实现了内核线程级别的进程管理与抢占式轮转调度，关键函数（`create_process`、`exit_process`、`wait_process`、`yield`、`scheduler`）已实现并通过内置测试验证。
+- 后续建议：
+  - 引入 `sleep/wakeup`，将 `wait_process` 从忙等改为事件驱动以降低 CPU 空转。
+  - 添加优先级或多级反馈队列，提升调度策略以适配差异化负载。
+  - 扩展到用户态进程，加入页表与系统调用框架，完成更完整的操作系统功能链路。
 
 ---
 
-## 思考题与解答
+附：关键源码路径回顾：
+- `kernel/proc/proc.c`  — 进程管理与调度实现
+- `kernel/proc/swtch.S` — 上下文切换汇编
+- `kernel/trap/trap_kernel.c` — 时钟中断与中断处理
+- `kernel/boot/main.c` — 启动与测试驱动
 
-1. 设计权衡：
-   - 系统调用的数量应该如何确定？
-     - 回答：优先支持最小必要集（Minimal API）以简化内核面向安全和正确性的实现。先实现进程管理、基本 I/O、内存管理和进程控制相关的调用；随着功能需求增加再逐步添加。过多的系统调用增加维护负担和攻击面，过少则会把复杂性推给用户态库。
-   - 如何平衡功能性和安全性？
-     - 回答：所有功能都应遵循“最小权限原则”与“防守式编程”。将复杂或危险的功能放在用户态库中实现，内核只提供经审核的、最小且必要的原语；对所有用户提供的指针和长度进行严格验证；对敏感操作增加权限检查或能力模型。
+（请在真实运行后补充“性能数据”与 `picture/` 中的截图文件名）
 
-2. 性能优化：
-   - 系统调用的主要开销在哪里？
-     - 回答：主要开销来自用户态/内核态切换（切换上下文、刷新或切换地址空间相关寄存器）、参数拷贝（用户-内核内存复制）、以及可能的同步/阻塞开销。不同架构对这些开销敏感度不同。
-   - 如何减少用户态/内核态切换开销？
-     - 回答：常见手段包括：批处理用户请求以减少调用频度（例如 writev/batched IO）、使用内核提供的零拷贝接口或 DMA 支持、通过 fast-path 实现常见系统调用（内联或使用轻量中断/软中断机制）、以及减少不必要的地址空间切换（保持页表或使用走私寄存器缓存）。另外还可以把部分可验证的操作放到用户态库以避免系统调用。
+## **思考题与解答**
 
-3. 安全考虑：
-   - 如何防止系统调用被滥用？
-     - 回答：实施权限检查（UID/GID、能力与访问控制列表）、限制资源使用（速率限制、配额）、对危险系统调用施加审计和日志、以及使用沙箱/容器机制将进程隔离。此外，最小化内核接口并采用可验证的实现可以减小滥用风险。
-   - 如何设计安全的参数传递机制？
-     - 回答：不要直接信任用户传来的指针，必须使用 `copyin`/`copyout` 或内核映射页表验证每次内存访问；对长度和偏移做防溢出检查；对于复杂对象使用句柄/索引替代直接指针；尽量在内核中统一进行边界检查与错误处理。
+1. 进程模型：
+   - 为什么选择这种进程结构设计？
+     - 选择以内核线程（kernel threads）为主的设计，可以把注意力集中在上下文切换、调度与同步上，而不引入用户态地址空间、页表与系统调用的复杂性，便于实验验证与调试。
+     - 结构简单、实现成本低，符合实验教学目标：先保证调度正确，再扩展功能。
+   - 如何支持轻量级线程？
+     - 实现独立的线程控制块（TCB）和内核栈，但共享进程级资源（如地址空间、文件表），线程创建使用类似 `thread_create()` 的接口，避免复制整个地址空间。
+     - 使用较小的创建/销毁开销（例如不走完整 `fork()` 路径），提供轻量级同步原语（自旋锁/互斥）和线程局部数据。
 
-4. 扩展性：
-   - 如何添加新的系统调用？
-     - 回答：在 `include/syscall.h` 中分配新的 syscall 编号，在内核中实现对应的 `sys_*` 函数，并在分发表（如 `syscall.c` 的 `syscalls[]`）注册。为兼容用户态，应更新用户态头文件和库，并确保 `ecall` 参数约定保持一致。
-   - 如何保持向后兼容性？
-     - 回答：不要重用或改变已有的系统调用号；为新增功能提供可选的新接口，而不是修改旧接口的行为；在用户态引入库抽象层（libc）来封装调用变化；对于重大变更提供版本标识或 ioctl/feature-flag 机制。
+2. 调度策略：
+   - 轮转调度的公平性如何？
+     - 轮转（round-robin）在相同时间片下对所有可运行任务提供时间公平性，但对 I/O 密集型与 CPU 密集型任务的感知不足，也无法保证实时约束或优先级区分。
+     - 实际公平性还依赖时间片长度、遍历顺序与中断触发频率；短时间片提升响应但增加上下文切换开销。
+   - 如何实现实时调度？
+     - 引入优先级队列或实时调度算法（如 RMS、EDF），将实时任务放入独立的调度通路，并保证优先级可抢占。
+     - 需要支持优先级继承、时间预算/带宽限制，以及在内核中减少长不可抢占区间以满足延迟约束。
 
-5. 错误处理：
-   - 系统调用失败时应该如何处理？
-     - 回答：在内核中确保错误被规范化为一组负数错误码（或 errno 值），并通过寄存器返回给用户态。对可恢复错误尽可能提供明确的错误码，避免内核直接 panic 除非遇到致命错误。
-   - 如何向用户程序报告详细的错误信息？
-     - 回答：通过标准化的错误码（例如 POSIX errno），并通过用户态库（libc）将其转换为可读文本（`strerror`）。对于调试目的，保留内核审计日志（仅供管理员查看）以免泄露敏感信息给普通进程。
+3. 性能优化：
+   - `fork()` 的性能瓶颈如何解决？
+     - 采用 Copy-On-Write（COW）机制，延迟页面复制直到写时，避免在 `fork()` 时立即复制整个地址空间。
+     - 提供 `vfork()` 或 `posix_spawn` 等更轻量的创建接口，并对大对象使用懒分配/映射策略。
+   - 上下文切换开销如何降低？
+     - 减少不必要的切换（增大时间片或使用协作式调度点），在汇编层只保存必要寄存器，减少保存/恢复工作量；优化锁设计以降低争用。
+     - 使用 per-CPU 数据结构 和 本地缓存来降低跨核同步成本，必要时采用批量切换或用户态线程方案减少内核切换频度。
 
----
+4. 资源管理：
+   - 如何实现进程资源限制？
+     - 在内核中对每类资源做计量（内存、文件描述符、CPU 时间等），并在分配点检查配额；提供类似 `ulimit` / cgroups 的接口以配置和执行限制。
+   - 如何处理进程资源泄漏？
+     - 使用引用计数、统一的资源释放路径（on-exit cleanup），并在退出路径中确保释放所有分配；增加内核诊断（日志/统计）和定期清理线程（reclaimer）。
 
-## 结论与后续工作建议
+5. 扩展性：
+   - 如何支持多核调度？
+     - 使用 per-core runqueue 与轻量锁（或无锁结构），在每核上运行本地调度器以减少全局争用；保留全局或分区式调度器以处理全局策略。
+   - 如何实现负载均衡？
+     - 定期收集每核负载信息并进行任务迁移（work-stealing 或主动迁移），考虑亲和性与缓存热度，迁移策略需权衡迁移成本与负载均衡收益。
 
-本次实验实现了内核级的进程管理、抢占式轮转调度，并扩展了 Lab6 的最小系统调用框架（`getpid/write/exit`）。系统在参数校验与安全边界上表现良好，基础测试通过。建议的后续工作：
-
-- 扩展系统调用集合与文件/设备抽象；
-- 实现阻塞/唤醒机制改进 `wait_process`；
-- 性能优化（零拷贝、fast-path）；
-- 引入更完整的权限与审计机制。
-
----
-
-*报告文件已生成为 `Report_complete.md`。若你希望我将其覆盖原 `Report.md` 或追加合并，请确认，我可以替你执行覆盖操作或直接将内容追加到原文件。*
+以上思路既包含理论说明，也给出可落地的实现建议；在后续扩展时可以逐步引入 COW、优先级队列、多核 runqueue 与资源配额机制，将实验内核一步步拓展为更完整的调度与资源管理子系统。

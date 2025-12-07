@@ -1,13 +1,19 @@
-/* memory leyout */
+/* memory layout */
 #ifndef __MEMLAYOUT_H__
 #define __MEMLAYOUT_H__
 
-// Sv39 支持的最大虚拟地址 (与 xv6 相同的简化)
+// page constants (Sv39)
+#define PGSIZE  4096
+#define PGSHIFT 12
+#define PG_ROUND_UP(sz)  (((sz) + PGSIZE - 1) & ~(PGSIZE-1))
+#define PG_ROUND_DOWN(a) ((a) & ~(PGSIZE-1))
+
+// virtual address ceiling (one below the maximum Sv39 VA)
 #define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
 
-// 预留的高地址 trampoline / trapframe 映射
-#define TRAMPOLINE (MAXVA - 0x1000)
-#define TRAPFRAME  (TRAMPOLINE - 0x1000)
+// trampoline/trapframe mapping (highest virtual pages)
+#define TRAMPOLINE (MAXVA - PGSIZE)
+#define TRAPFRAME  (TRAMPOLINE - PGSIZE)
 
 // UART 相关
 #define UART_BASE  0x10000000ul

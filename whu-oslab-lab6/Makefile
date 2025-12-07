@@ -1,13 +1,17 @@
 include common.mk
 
 KERN = kernel
+USER = user
 KERNEL_ELF = kernel-qemu
 CPUNUM = 2
 FS_IMG = none
 
-.PHONY: clean $(KERN)
+.PHONY: clean $(KERN) $(USER)
 
-$(KERN):
+$(KERN): $(USER)
+	$(MAKE) build --directory=$@
+
+$(USER):
 	$(MAKE) build --directory=$@
 
 # QEMU相关配置
@@ -35,4 +39,5 @@ qemu-gdb: $(KERN) .gdbinit
 
 clean:
 	$(MAKE) --directory=$(KERN) clean
+	$(MAKE) --directory=$(USER) clean
 	rm -f $(KERNEL_ELF) .gdbinit

@@ -1,4 +1,8 @@
+#ifndef __RISCV_H__
+#define __RISCV_H__
+
 #include "common.h"
+#include "memlayout.h"
 
 // 获取当前CPU的hartid
 static inline uint64 r_mhartid()
@@ -329,20 +333,9 @@ static inline void sfence_vma()
 #define MIE_STIE (1L << 5)  // supervisor timer
 // 内存管理相关
 
-#define PGSIZE 4096 // bytes per page
-#define PGSHIFT 12  // bits of offset within a page
-
-#define PG_ROUND_UP(sz)  (((sz)+PGSIZE-1) & ~(PGSIZE-1))
-#define PG_ROUND_DOWN(a) (((a)) & ~(PGSIZE-1))
-
-
 // extract the three 9-bit page table indices from a virtual address.
 #define PXMASK          0x1FF // 9 bits
 #define PXSHIFT(level)  (PGSHIFT+(9*(level)))
 #define PX(level, va)   ((((uint64) (va)) >> PXSHIFT(level)) & PXMASK)
 
-// one beyond the highest possible virtual address.
-// MAXVA is actually one bit less than the max allowed by
-// Sv39, to avoid having to sign-extend virtual addresses
-// that have the high bit set.
-#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+#endif // __RISCV_H__

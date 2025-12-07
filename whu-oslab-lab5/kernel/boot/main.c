@@ -16,6 +16,7 @@ static void run_all_tests(void);
 static void test_process_creation(void);
 static void test_scheduler(void);
 static void test_synchronization(void);
+static void test_exit_wait(void);
 static void debug_proc_table(void);
 
 // === 测试用任务 ===
@@ -23,6 +24,7 @@ static void simple_task(void);
 static void cpu_task(void);
 static void producer_task(void);
 static void consumer_task(void);
+static void exit_status_task(void);
 
 // === 共享测试状态 ===
 static spinlock_t sync_lock;
@@ -31,6 +33,7 @@ static volatile int produced_total = 0;
 static volatile int consumed_total = 0;
 static const int sync_capacity = 4;
 static const int sync_target = 24;
+static const int exit_code_factor = 7;
 
 // 简单的内核线程任务（演示用）
 static void worker_body(const char *name, uint64 workload);
@@ -84,7 +87,8 @@ int main()
         started = 1;
 
         scheduler();
-    } else {
+    } 
+    else {
         while(started == 0);
         __sync_synchronize();
 
@@ -155,6 +159,7 @@ static void run_all_tests(void)
     test_process_creation();
     test_scheduler();
     test_synchronization();
+    test_exit_wait();
     debug_proc_table();
     printf("[TEST] All tests completed, launching worker demo...\n");
     start_worker_demo();
@@ -183,19 +188,16 @@ static void cpu_task(void)
 static void producer_task(void)
 {
     for (int i = 0; i < sync_target; i++) {
-        while (1) {
-            spinlock_acquire(&sync_lock);
-            if (sync_buffer < sync_capacity) {
-                sync_buffer++;
-                produced_total++;
-                spinlock_release(&sync_lock);
-                printf("[producer] produced item #%d (buffer=%d)\n",
-                       produced_total, sync_buffer);
-                break;
-            }
-            spinlock_release(&sync_lock);
-            yield();
+        spinlock_acquire(&sync_lock);
+        while (sync_buffer >= sync_capacity) {
+            sleep(&sync_buffer, &sync_lock);
         }
+        sync_buffer++;
+        produced_total++;
+        printf("[producer] produced item #%d (buffer=%d)\n",
+               produced_total, sync_buffer);
+        wakeup(&sync_buffer);
+        spinlock_release(&sync_lock);
     }
     printf("[producer] finished production (%d items)\n", sync_target);
     exit_process(0);
@@ -204,22 +206,26 @@ static void producer_task(void)
 static void consumer_task(void)
 {
     for (int i = 0; i < sync_target; i++) {
-        while (1) {
-            spinlock_acquire(&sync_lock);
-            if (sync_buffer > 0) {
-                sync_buffer--;
-                consumed_total++;
-                spinlock_release(&sync_lock);
-                printf("[consumer] consumed item #%d (buffer=%d)\n",
-                       consumed_total, sync_buffer);
-                break;
-            }
-            spinlock_release(&sync_lock);
-            yield();
+        spinlock_acquire(&sync_lock);
+        while (sync_buffer <= 0) {
+            sleep(&sync_buffer, &sync_lock);
         }
+        sync_buffer--;
+        consumed_total++;
+        printf("[consumer] consumed item #%d (buffer=%d)\n",
+               consumed_total, sync_buffer);
+        wakeup(&sync_buffer);
+        spinlock_release(&sync_lock);
     }
     printf("[consumer] finished consumption (%d items)\n", sync_target);
     exit_process(0);
+}
+
+static void exit_status_task(void)
+{
+    int pid = myproc()->pid;
+    int status = pid * exit_code_factor;
+    exit_process(status);
 }
 
 static void test_process_creation(void)
@@ -271,6 +277,36 @@ static void test_synchronization(void)
     printf("[TEST] produced=%d consumed=%d buffer=%d\n",
            produced_total, consumed_total, sync_buffer);
     printf("[TEST] test_synchronization completed\n");
+}
+
+static void test_exit_wait(void)
+{
+    printf("\n[TEST] test_exit_wait\n");
+    const int workers = 4;
+    for (int i = 0; i < workers; i++) {
+        int pid = create_process(exit_status_task, "exit-status");
+        if (pid < 0)
+            panic("Failed to create exit_status_task");
+        printf("[TEST] exit worker pid=%d scheduled\n", pid);
+    }
+
+    for (int completed = 0; completed < workers; completed++) {
+        int status = 0;
+        int pid = wait_process(&status);
+        if (pid < 0)
+            panic("wait_process returned -1 unexpectedly");
+        int expected = pid * exit_code_factor;
+        if (status != expected) {
+            printf("[TEST] expected status %d for pid %d, got %d\n",
+                   expected, pid, status);
+            panic("exit status mismatch");
+        }
+    }
+
+    if (wait_process(NULL) != -1) {
+        panic("wait_process should return -1 when no children");
+    }
+    printf("[TEST] test_exit_wait completed\n");
 }
 
 static const char *proc_state_name(enum proc_state state)

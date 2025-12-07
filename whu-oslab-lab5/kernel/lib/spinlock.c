@@ -50,7 +50,7 @@ void spinlock_acquire(spinlock_t *lk)
 {
     push_off();
     if (spinlock_holding(lk))
-        panic("acquire");
+        panic(lk->name ? lk->name : "acquire");
 
     while (__sync_lock_test_and_set(&lk->locked, 1) != 0)
         ;

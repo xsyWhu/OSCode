@@ -1,5 +1,6 @@
 #include "lib/string.h"
 #include "lib/print.h"
+#include "lib/lock.h"
 #include "mem/pmem.h"
 #include "proc/proc.h"
 #include "riscv.h"
@@ -11,8 +12,11 @@ struct cpu cpus[NCPU];
 
 static int next_pid = 1;
 static int proc_initialized = 0;
+static spinlock_t proc_table_lock;
+static spinlock_t pid_lock;
 
 static struct proc* alloc_process(void (*entry)(void), const char *name);
+static void free_process(struct proc *p);
 static void proc_trampoline(void) __attribute__((noreturn));
 
 int mycpuid(void)
@@ -38,9 +42,15 @@ void proc_init(void)
 
     memset(proc_table, 0, sizeof(proc_table));
     memset(cpus, 0, sizeof(cpus));
+    spinlock_init(&proc_table_lock, "proc_table");
+    spinlock_init(&pid_lock, "pid_lock");
 
     for (int i = 0; i < NCPU; i++) {
         cpus[i].id = i;
+    }
+    for (int i = 0; i < NPROC; i++) {
+        spinlock_init(&proc_table[i].lock, "proc");
+        proc_table[i].state = PROC_UNUSED;
     }
 
     next_pid = 1;
@@ -51,22 +61,30 @@ static struct proc* alloc_process(void (*entry)(void), const char *name)
 {
     struct proc *p = 0;
 
+    spinlock_acquire(&proc_table_lock);
     for (int i = 0; i < NPROC; i++) {
         if (proc_table[i].state == PROC_UNUSED) {
             p = &proc_table[i];
+            spinlock_acquire(&p->lock);
+            p->state = PROC_USED;
             break;
         }
     }
+    spinlock_release(&proc_table_lock);
 
     if (!p)
         return 0;
 
-    memset(p, 0, sizeof(*p));
-
+    spinlock_acquire(&pid_lock);
     p->pid = next_pid++;
-    p->state = PROC_RUNNABLE;
+    spinlock_release(&pid_lock);
+
     p->entry = entry;
     p->parent = myproc();
+    p->exit_code = 0;
+    p->killed = 0;
+    p->chan = 0;
+    p->name[0] = '\0';
 
     if (name && *name) {
         strncpy(p->name, name, sizeof(p->name) - 1);
@@ -75,17 +93,20 @@ static struct proc* alloc_process(void (*entry)(void), const char *name)
 
     void *stack_page = pmem_alloc(true);
     if (!stack_page) {
-        memset(p, 0, sizeof(*p));
+        p->pid = 0;
+        p->parent = 0;
+        p->entry = 0;
+        p->state = PROC_UNUSED;
+        spinlock_release(&p->lock);
         return 0;
     }
 
     p->kstack = (uint64)stack_page;
-
     memset(&p->ctx, 0, sizeof(p->ctx));
     p->ctx.sp = p->kstack + PGSIZE;
     p->ctx.ra = (uint64)proc_trampoline;
 
-    return p;
+    return p; // lock held
 }
 
 int create_process(void (*entry)(void), const char *name)
@@ -100,7 +121,10 @@ int create_process(void (*entry)(void), const char *name)
     if (!p)
         return -1;
 
-    return p->pid;
+    p->state = PROC_RUNNABLE;
+    int pid = p->pid;
+    spinlock_release(&p->lock);
+    return pid;
 }
 
 void exit_process(int status)
@@ -109,8 +133,13 @@ void exit_process(int status)
     if (!p)
         panic("exit_process: no current process");
 
+    spinlock_acquire(&p->lock);
     p->exit_code = status;
     p->state = PROC_ZOMBIE;
+    spinlock_release(&p->lock);
+
+    if (p->parent)
+        wakeup(p->parent);
 
     struct cpu *c = mycpu();
     swtch(&p->ctx, &c->ctx);
@@ -127,6 +156,7 @@ int wait_process(int *status)
     if (!cur)
         return -1;
 
+    spinlock_acquire(&proc_table_lock);
     for (;;) {
         int have_child = 0;
 
@@ -137,25 +167,27 @@ int wait_process(int *status)
                 continue;
 
             have_child = 1;
+            spinlock_acquire(&p->lock);
             if (p->state == PROC_ZOMBIE) {
                 int pid = p->pid;
 
                 if (status)
                     *status = p->exit_code;
 
-                if (p->kstack)
-                    pmem_free(p->kstack, true);
-
-                memset(p, 0, sizeof(*p));
-                p->state = PROC_UNUSED;
+                free_process(p);
+                spinlock_release(&p->lock);
+                spinlock_release(&proc_table_lock);
                 return pid;
             }
+            spinlock_release(&p->lock);
         }
 
-        if (!have_child)
+        if (!have_child) {
+            spinlock_release(&proc_table_lock);
             return -1;
+        }
 
-        yield();
+        sleep(cur, &proc_table_lock);
     }
 }
 
@@ -167,7 +199,9 @@ void yield(void)
     if (!p)
         return;
 
+    spinlock_acquire(&p->lock);
     p->state = PROC_RUNNABLE;
+    spinlock_release(&p->lock);
     swtch(&p->ctx, &c->ctx);
 }
 
@@ -182,17 +216,75 @@ void scheduler(void)
         for (int i = 0; i < NPROC; i++) {
             struct proc *p = &proc_table[i];
 
-            if (p->state != PROC_RUNNABLE)
+            spinlock_acquire(&p->lock);
+            if (p->state != PROC_RUNNABLE) {
+                spinlock_release(&p->lock);
                 continue;
+            }
 
             c->proc = p;
             p->state = PROC_RUNNING;
+            spinlock_release(&p->lock);
 
             swtch(&c->ctx, &p->ctx);
 
             c->proc = 0;
         }
     }
+}
+
+void sleep(void *chan, spinlock_t *lk)
+{
+    struct proc *p = myproc();
+    if (!p || !lk)
+        panic("sleep: invalid args");
+
+    spinlock_acquire(&p->lock);
+    spinlock_release(lk);
+    p->chan = chan;
+    p->state = PROC_SLEEPING;
+
+    spinlock_release(&p->lock);
+    swtch(&p->ctx, &mycpu()->ctx);
+
+    spinlock_acquire(&p->lock);
+    p->chan = 0;
+    spinlock_release(&p->lock);
+    spinlock_acquire(lk);
+}
+
+void wakeup(void *chan)
+{
+    for (int i = 0; i < NPROC; i++) {
+        struct proc *p = &proc_table[i];
+
+        spinlock_acquire(&p->lock);
+        if (p->state == PROC_SLEEPING && p->chan == chan) {
+            p->chan = 0;
+            p->state = PROC_RUNNABLE;
+        }
+        spinlock_release(&p->lock);
+    }
+}
+
+static void free_process(struct proc *p)
+{
+    if (!p)
+        return;
+
+    if (p->kstack) {
+        pmem_free(p->kstack, true);
+        p->kstack = 0;
+    }
+
+    p->pid = 0;
+    p->parent = 0;
+    p->exit_code = 0;
+    p->killed = 0;
+    p->chan = 0;
+    p->entry = 0;
+    p->name[0] = '\0';
+    p->state = PROC_UNUSED;
 }
 
 static void proc_trampoline(void)

@@ -2,6 +2,7 @@
 #define __PROC_H__
 
 #include "common.h"
+#include "lib/lock.h"
 
 #define NPROC 16   // 允许存在的最大进程数
 
@@ -28,6 +29,7 @@ struct context {
 // 简化的进程状态
 enum proc_state {
     PROC_UNUSED = 0,
+    PROC_USED,
     PROC_RUNNABLE,
     PROC_RUNNING,
     PROC_SLEEPING,
@@ -36,18 +38,19 @@ enum proc_state {
 
 // 进程（实际上是内核线程）描述符
 struct proc {
-    int pid;
+    spinlock_t lock;      // 保护进程内部字段
     enum proc_state state;
+    int pid;
+    struct proc *parent;
+    int exit_code;
+    int killed;
+    void *chan;           // sleep/wakeup 使用
     char name[16];
 
     uint64 kstack;        // 内核栈底（低地址）
     struct context ctx;   // 被调度时需要保存的寄存器
 
     void (*entry)(void);  // 运行的函数
-    struct proc *parent;  // 创建它的进程
-    int exit_code;
-
-    void *chan;           // 预留给 sleep/wakeup
 };
 
 // 每个 CPU 的状态
@@ -72,6 +75,8 @@ int create_process(void (*entry)(void), const char *name);
 void exit_process(int status) __attribute__((noreturn));
 int wait_process(int *status);
 void yield(void);
+void sleep(void *chan, spinlock_t *lk);
+void wakeup(void *chan);
 void scheduler(void) __attribute__((noreturn));
 
 #endif

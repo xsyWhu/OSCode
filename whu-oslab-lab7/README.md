@@ -1,73 +1,116 @@
-# Lab7：文件系统（Lab — Filesystem）
+# Lab7：文件系统
 
-## 概述
+本仓库用于展示 Lab7（文件系统）阶段的成果：基于 RISC-V 内核实现磁盘块管理、inode/目录操作、写前日志、mkfs 工具与内核自测。以下内容仅与 Lab7 相关。
 
-本实验在现有内核基础上实现了一个简化的 xv6 风格的文件系统，使用一个 RAM-backed block device（内存盘）作为磁盘，并提供缓冲缓存、inode 缓存、简单的写前日志（log）以及目录/文件的读写接口。实现目标是让内核拥有自包含的文件系统以便在 QEMU 下运行与测试。
+---
 
-主要实现要点：
-- 块大小 `BSIZE = 4096`（4KB），内存盘大小 `RAMDISK_BLOCKS = 8192`（约 32MB）。
-- 支持 inode、直接/间接块（`NDIRECT = 12`）、目录条目、文件读写与创建/删除。
-- 简单的写前日志接口以保持 FS 代码结构一致（RAM 磁盘不需跨重启恢复）。
-- 缓冲缓存（bcache）采用小型 LRU 列表。
-- 提供 `virtio` 磁盘驱动（`virtio_blk`）作为设备层，当前也有一个内存盘实现用于自包含测试。
+## 1. 环境准备
 
-## 环境与依赖
+- Ubuntu 或 WSL2
+- RISC-V 交叉工具链：`riscv64-linux-gnu-gcc`/`ld`
+- QEMU 5.0+，要求 virtio modern 接口（运行时需 `-global virtio-mmio.force-legacy=false`）
+- Python 3（执行 `tools/mkfs.py` 构建镜像）
 
-- Ubuntu/WSL2 或等效 Linux 环境
-- RISC-V 交叉编译工具链（`riscv64-linux-gnu-*`）
-- QEMU（支持 riscv64 virt 机器）
-
-建议已完成前序实验（内存管理、中断）以保证内核其余部分可用。
-
-## 构建与运行
-
-在仓库根目录运行：
+快速检查：
 
 ```bash
-make           # 构建 kernel-qemu
-make qemu      # 启动 QEMU（nographic）
+riscv64-linux-gnu-gcc --version
+qemu-system-riscv64 --version
 ```
 
-清理：
+---
 
-```bash
-make clean
+## 2. 构建与运行
+
+1. **编译内核/用户程序**
+
+   ```bash
+   make
+   ```
+
+2. **生成文件系统镜像**
+
+   ```bash
+   python3 tools/mkfs.py fs.img 8   # 8MB，自动写入超级块、根目录、位图
+   ```
+
+3. **运行内核与自测**
+
+   ```bash
+   make qemu         # 自动串行运行 Lab7 自测
+   ```
+
+   过程中会看到 `[LAB7] test_filesystem_integrity/concurrent_access/performance`、`debug_*` 等输出，可据此确认状态。
+
+4. **调试与清理**
+
+   - `make qemu-gdb`：带调试 stub。
+   - `make clean`：清理生成文件。
+
+---
+
+## 3. 文件系统特性
+
+- **块缓存 (`kernel/fs/bio.c`)**：32 块 LRU 缓存，所有 `bread/bwrite` 都经过 virtio 驱动，并统计读写次数。
+- **写前日志 (`kernel/fs/log.c`)**：`begin_op/log_write/end_op` 包装了日志头与提交流程，`recover_from_log()` 在启动时自动重放。
+- **inode/目录 (`kernel/fs/fs.c`, `dir.c`, `file.c`)**：支持 11 个直接块 + 1 个一级间接块，`inode_create/dirlink/namei` 构成整个路径访问链。
+- **镜像构建 (`tools/mkfs.py`)**：Python 计算布局并写入超级块、inode 区与位图，可通过参数更改镜像大小。
+- **调试辅助**：`debug_filesystem_state()` 打印超级块和空闲块数，`debug_inode_usage()` 直接扫描磁盘 inode，`debug_disk_io()` 给出 I/O 统计。
+
+---
+
+## 4. 自测流程
+
+`kernel/boot/main.c` 在内核启动完毕后自动执行以下测试：
+
+| 测试 | 说明 | 默认规模 |
+| --- | --- | --- |
+| `test_filesystem_integrity` | 创建 `testfile` → 写入 `"Hello, filesystem!"` → 读回校验 → 删除。 | 单文件 |
+| `test_concurrent_access` | 多个 worker 循环创建/删除 `test_<worker>_<iter>`，验证 inode 与块回收。 | `LAB7_CONCURRENT_WORKERS=2`、`LAB7_CONCURRENT_ITERS=2` |
+| `test_filesystem_performance` | 写入 2 个 4B 小文件 + 1 个 4MB 大文件，统计 ticks。 | `LAB7_PERF_SMALL_FILES=2`、`LAB7_PERF_LARGE_WRITES=1` |
+| `debug_*` | 打印超级块、空闲 inode、I/O 次数，便于定位问题。 | — |
+
+可以在 `kernel/boot/main.c` 中调大上述宏以施加更多压力；若缓存不足，可同步修改 `kernel/fs/bio.c` 的 `NBUF`。
+
+---
+
+## 5. 目录导航
+
+```
+.
+├── kernel/fs/            # 文件系统核心：bio、fs、dir、log、file、pipe
+├── kernel/dev/virtio_disk.c
+├── kernel/boot/main.c    # 启动及 Lab7 测试入口
+├── tools/mkfs.py         # 生成 fs.img
+├── Report.md             # Lab7 实验报告
+└── README.md             # 本文件
 ```
 
-注意：若因 `/tmp` 权限或交叉编译临时文件问题导致构建失败，可临时设置 `TMPDIR`：
+---
 
-```bash
-export TMPDIR=$PWD/tmp
-```
+## 6. 常见问题
 
-## 主要文件与目录
+1. **`virtio_disk_init` 报设备不支持**  
+   确认 QEMU 含 `-global virtio-mmio.force-legacy=false`。仓库 `Makefile` 已添加，手动启动时别遗漏。
 
-- `include/fs/fs.h`：文件系统接口与 on-disk 结构定义（superblock、dinode、inode、buf 等）。
-- `kernel/fs/fs.c`：核心文件系统实现（inode 缓存、分配、目录、读写、bmap 等）。
-- `kernel/fs/bio.c`：缓冲缓存（bcache）实现，包含 LRU 管理与设备读写接口封装。
-- `kernel/fs/file.c`：进程/内核文件表实现、文件读写/关闭等操作。
-- `kernel/fs/log.c`：简化的写前日志（log）接口。
-- `kernel/fs/ramdisk.c`：RAM-backed block device（用于自包含测试）。
-- `kernel/dev/virtio_blk.c`：virtio 块设备驱动（与 QEMU 的 virtio-blk 交互）。
+2. **`panic: ilock: no type`**  
+   说明 `fs.img` 未初始化根目录；重新运行 `python3 tools/mkfs.py fs.img 8`。
 
-## 常用调试 / 统计接口
+3. **`bget: no buffers`**  
+   并发测试 pin 住了全部缓存块。可调小 `LAB7_CONCURRENT_*` 或增大 `kernel/fs/bio.c` 中 `NBUF`。
 
-- `fs_count_free_blocks()`：统计文件系统空闲数据块数。
-- `fs_count_free_inodes()`：统计空闲 inode 数。
-- `bcache_get_hits()` / `bcache_get_misses()`：缓冲缓存命中/未命中计数。
-- `ramdisk_get_reads()` / `ramdisk_get_writes()`：内存盘读写计数。
+4. **日志刷屏**  
+   写日志时会显示 `[virtio] submit block ...`，属于正常现象，可通过将 `printf` 封装为 `DEBUG_VIRTIO` 宏后再关闭。
 
-这些函数在内核测试驱动或启动日志中可以被调用用于验证实现正确性与性能观察。
+5. **镜像被占用**  
+   若上次 `make qemu` 未正常退出，执行 `pkill -f qemu-system-riscv64` 后重启。
 
-## 常见问题与说明
+---
 
-- 文件系统以 RAM 磁盘为主（`ramdisk.c`），因此在 QEMU 重启后数据不会持久化（但这使测试更可控）。
-- `virtio_blk` 驱动会尝试探测 MMIO 区并与 QEMU 的 virtio 设备交互；在无 virtio 设备的环境中，RAM 磁盘仍然可用用于运行 FS。
-- 编译器告警（例如未使用变量）在启用 `-Werror` 时会导致构建失败，请按提示修改或标记未使用变量。
+## 7. 后续工作
 
-## 后续扩展建议
+- 增加更大的块缓存与 `sleep/wakeup` 机制，减少在 `begin_op` 和 `balloc` 中的忙等。
+- 扩展 inode 地址字段（双重间接块或 extent）以支持更大的文件。
+- 引入自动化脚本，对镜像进行崩溃恢复回归测试。
 
-- 持久化支持（将 RAM 磁盘替换为 virtio-backed 设备并验证日志恢复）。
-- 引入更复杂的缓存策略或哈希加速的 buffer lookup。  
-- 增加目录树遍历工具、`fsck` 风格的完整性检查。  
-- 支持多线程并发下更强的锁策略（当前使用自旋锁、inode 缓存简单实现）。
+更多细节请参考 `Report.md`。***

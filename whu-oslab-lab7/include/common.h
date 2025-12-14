@@ -16,12 +16,6 @@ typedef unsigned long long     uint64;
 typedef unsigned long long         reg; 
 typedef enum {false = 0, true = 1} bool;
 
-#ifndef __UINT_ALIAS__
-#define __UINT_ALIAS__
-typedef unsigned int uint;
-typedef unsigned short ushort;
-#endif
-
 #ifndef NULL
 #define NULL ((void*)0)
 #endif

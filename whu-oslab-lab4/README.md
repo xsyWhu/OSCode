@@ -1,80 +1,76 @@
-# Lab4 —— 中断
+# Lab4 —— RISC-V 中断与时钟管理
 
-## 组织结构
-### 代码组织结构
+本仓库对应“从零构建操作系统”实验四，完成了 **M/S 模式中断委托、trap 框架、PLIC 外设中断分发、CLINT 时钟中断及自测用例**。本文档提供代码概览、依赖与构建步骤、测试方法与调试提示，方便验收与复现实验结果。
 
-whu-oslab-lab3
-├── include 
-│   ├── uart.h                         // (串口头文件)
-│   ├── lib 
-│   │   ├── print.h                    // (打印库头文件)
-│   │   └── lock.h                     // (锁/自旋锁头文件)
-│   ├── proc 
-│   │   ├── cpu.h                      // (CPU/Hart 相关)
-│   │   └── proc.h                     // (进程/线程相关)
-│   ├── mem 
-│   │   ├── pmem.h                     // (新增: 物理内存管理接口)
-│   │   └── vmem.h                     // (新增: 虚拟内存/页表管理接口)
-│   ├── common.h                       // (基本类型定义)
-│   ├── memlayout.h                    // (物理内存布局)
-│   └── riscv.h                        // (RISC-V 寄存器和页宏)
-├── kernel 
-│   ├── boot 
-│   │   ├── main.c                     // (内核入口，包含 pmem/vmem 测试)
-│   │   ├── start.c                    // (启动代码 C 部分)
-│   │   ├── entry.S                    // (启动代码 汇编部分)
-│   │   └── Makefile 
-│   ├── dev 
-│   │   ├── uart.c                     // (串口驱动实现)
-│   │   └── Makefile 
-│   ├── lib 
-│   │   ├── print.c                    // (打印库实现)
-│   │   ├── spinlock.c                 // (自旋锁实现)
-│   │   └── Makefile 
-│   ├── proc 
-│   │   ├── pro.c                      // (进程/线程实现)
-│   │   └── Makefile 
-│   ├── mem 
-│   │   ├── pmem.c                     // (新增: 物理内存分配器实现)
-│   │   ├── vmem.c                     // (新增: 页表管理与虚拟内存初始化)
-│   │   └── Makefile                   // (mem 目录下的 Makefile)
-│   ├── Makefile 
-│   └── kernel.ld                      // (链接脚本)
-├── picture 
-│   └── *.png                          // (图片资源)
-├── Makefile                           // (顶层 Makefile)
-├── common.mk                          // (通用配置)
-├── README.md                          // (项目说明)
-└── Report.md                          // (实验报告)
+---
 
-## Lab4实验说明
+## 代码结构
 
-### 这次中断实验我主要完成了三块内容：
-① RISC-V 中断寄存器与委托的初始化；
-② 内核 trap 框架：上下文保存/恢复 + 中断/异常分发；
-③ 时钟中断处理与测试函数（test_xxx 调试三件套）。
+| 目录 | 说明 |
+| --- | --- |
+| `kernel/boot/` | `start.c` 完成 M-mode 初始化与 `timer_init()`；`main.c` 负责打印、自测、开启中断。 |
+| `kernel/trap/` | `trap.S` 提供 S-mode `kernel_vector` 与 M-mode `timer_vector`；`trap_kernel.c` 提供 IRQ 注册表、异常处理和时钟/外设分发逻辑。 |
+| `kernel/dev/` | `timer.c` 管理 `ticks` 与 `mscratch`，`plic.c` 封装 PLIC 操作，`uart.c` 完成 16550 驱动与中断回显。 |
+| `kernel/lib/` | `print.c`、`lock.c` 等基础设施，支持内核日志和自旋锁。 |
+| `kernel/mem/`、`kernel/proc/` | 为后续实验预留的内存与 CPU 结构体定义，本实验使用其中的 `mycpu()/mycpuid()`。 |
+| `include/` | 统一头文件（`trap.h`、`timer.h`、`memlayout.h` 等）描述硬件寄存器和接口。 |
 
-（1）
-#### 在机器模式初始化代码里
-我按照讲义要求配置了 RISC-V 的中断相关 CSR：设置 mideleg / medeleg，把时钟中断等委托给 S 模式来处理，符合“M 模式兜底，S 模式真正跑 OS”这个模型。开启了 sie/sstatus 里的中断使能位，保证 S 模式能收到外部/时钟中断。
-#### 设置了中断向量：
-为 M 模式设置 mtvec 指向机器定时器入口（类似 xv6 里的 timervec），为 S 模式设置 stvec 指向内核 trap 入口（我的 kernelvec 汇编入口），这样一旦有 trap，硬件就会跳到我写的入口代码。
-#### 时钟中断部分：
-通过 SBI 的 sbi_set_timer（或等价接口）在启动时设置第一次时钟中断，在每次时钟中断处理完之后，再次调用 sbi_set_timer 预约下一次时钟中断，实现周期性 tick。
+---
 
-（2）trap框架
-#### 汇编入口 kernelvec：
-参照讲义和 xv6，我在汇编里按固定顺序保存了通用寄存器到当前 CPU 的内核栈/trapframe 结构里，包括 ra/sp/gp/t0-t6/s0-s11/a0-a7 等需要在 C 里用到的寄存器。然后跳到 C 函数 kerneltrap（或者统一的 trap_handler）做逻辑判断。
-#### C 端的 trap 分发：
-在 kerneltrap() 里，我读取 scause / sepc / stval：如果是“中断位 = 1 且原因为时钟中断”，就调用自己的 timer_interrupt()；如果是其他外设中断（如果有），进入相应分支；如果是异常，就交给 handle_exception() 做统一处理，比如非法指令、访存错误、将来可以扩展系统调用等。
-#### 返回路径：
-C 处理完后返回汇编，汇编根据刚才保存的顺序恢复寄存器，最后通过 sret 回到被打断的那条指令之后继续执行，确保中断对原程序是“透明”的。
+## 构建与运行
 
-（3）Test
-#### 时钟中断处理逻辑：
-在 timer_interrupt() 里，我维护了一个全局 tick 计数器，每次时钟中断 tick++，可以作为“系统时间片”的基础。同时在这个函数里重新调用 sbi_set_timer(get_time() + interval)，保证时钟中断是周期性的，而不是只来一次。
-目前我主要用 tick 做基础心跳/调试输出，为后面的调度器实验预留了接口，比如将来可以在这里触发 schedule() 做时间片轮转。
-#### 测试与调试三件套（test_xxx 系列）：
-test_timer_interrupt()：参考讲义里的思路，我在中断处理里增加一个计数变量，然后在主循环里打印“等待第 N 次中断”，直到计数达到预期值，通过这个方式验证时钟中断确实按期触发，tick 在递增。
-test_exception_handling()：人为制造几种异常场景（比如访问非法地址或执行非法指令），看是否能进入统一的异常处理分支，并且不会直接把内核打崩。
-test_interrupt_overhead()：通过 get_time() 在中断前后打点，粗略估算一次中断处理的开销，为后续性能分析做准备。
+1. **依赖**  
+   - 任一可用于裸机 RISC-V 的交叉工具链：`riscv64-unknown-elf-gcc` 或 `riscv64-linux-gnu-gcc`。  
+   - QEMU 5.0+，需包含 `qemu-system-riscv64`。  
+   - GNU make。
+
+2. **构建**  
+   ```sh
+   make            # 生成 kernel.bin
+   make clean      # 清理产物
+   ```
+
+3. **运行**  
+   ```sh
+   make qemu       # 启动 QEMU 并输出串口日志
+   make qemu-gdb   # QEMU 等待 GDB 连入 (TCP 1234)
+   ```
+
+4. **GDB 调试**（可选）  
+   ```sh
+   riscv64-unknown-elf-gdb kernel/kernel.elf
+   (gdb) target remote :1234
+   (gdb) b trap_kernel_handler
+   (gdb) c
+   ```
+
+---
+
+## 实验功能与验证
+
+1. **定时器与 ticks**  
+   - 在 `main()` 中调用 `test_timer_interrupt()`，串口会输出 3 组测试：50 次 tick 观测、10 tick 精度验证、20 tick 实时监控。  
+   - `timer_get_ticks()` 读取受自旋锁保护的计数，验证 M-mode → S-mode 委托与 `timer_update()` 生效。
+
+2. **异常处理**  
+   - `test_exception_handling()` 可触发非法指令、越界访存和 S-mode `ecall`，`handle_exception()` 会打印 `scause/stval` 并 `panic`，用于检查异常路径。
+
+3. **外设中断**  
+   - UART 中断由 `register_interrupt(UART_IRQ, uart_intr)` 注册。运行 `make qemu` 后在串口敲击键盘即可回显，证明 PLIC Claim/Complete、使能开关正常。
+
+4. **性能观测**  
+   - `test_interrupt_overhead()` 在等待 20 个 tick 的同时读取 `r_time()`，输出平均 tick 间隔（约 1e6 cycle），用于演示 trap 处理开销评估方法。
+
+---
+
+## 常见问题与调试建议
+
+- **无中断输出**：确认 `make` 后重新运行，确保 `start.c` 中的 `w_mideleg/mideleg`、`w_sie()` 未被覆盖；可在 `trap_kernel_handler()` 中暂时打印 `scause`。
+- **PLIC Claim 恒为 0**：表明没有 pending IRQ，检查 `enable_interrupt(UART_IRQ)` 是否在 `trap_inithart()` 执行，或 UART 是否开启接收中断。
+- **时钟停止增长**：可能是 `timer_vector` 未正确写入 `mscratch` 或 `INTERVAL` 过小导致溢出。确认 `timer_init()` 在每个 hart 调用且 `CLINT_MTIMECMP` 正确更新。
+- **异常未触发**：确保 `test_exception_handling()` 中只启用一项测试，避免在第一次 panic 后继续执行。
+
+如需提交验收，请提供：
+1. `make qemu` 的完整串口日志（包含 tick/exception 测试）。  
+2. `Report.md`（本仓库已更新）。  
+3. 触发异常或 tick 运行时的截图/录像（可按报告说明生成）。

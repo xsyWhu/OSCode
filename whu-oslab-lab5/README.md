@@ -4,7 +4,7 @@
 
 - Ubuntu/WSL2 + `riscv64-linux-gnu-*` 交叉编译工具链  
 - QEMU (virt, riscv64)  
-- 需已完成前置实验（内存管理、中断等）
+- 已完成前置实验（内存管理、中断等）
 
 ## 2. 编译与运行
 
@@ -31,28 +31,59 @@ make clean
 ## 4. 目录说明
 
 ```
-kernel/
-  boot/main.c          # 启动 & 测试驱动
-  proc/proc.c          # 进程管理与调度
-  proc/swtch.S         # 上下文切换汇编
-  trap/trap_kernel.c   # 中断/异常处理
-include/
-  proc/proc.h          # 进程/CPU 结构定义
-  lib/...              # 工具库、锁、字符串等
-Report.md              # 实验报告
-README.md              # 本文件
+whu-oslab-lab5/
+├── Makefile / common.mk
+│   ├── 构建入口：交叉编译、链接、生成 kernel-qemu
+│   └── 常用目标：make / make qemu / make clean
+│
+├── kernel/                           # 内核源码（S-mode 为主，含少量 M-mode 启动/定时器）
+│   ├── kernel.ld                     # 链接脚本：段布局、符号导出
+│   │
+│   ├── boot/                         # 启动链路：从 entry 到进入 scheduler
+│   │   ├── entry.S                   # 最早入口：栈/基础环境
+│   │   ├── start.c                   # M-mode 早期初始化、委托、定时器初始化、mret 到 S-mode
+│   │   └── main.c                    # 内核主函数：初始化各子系统、创建/演示进程(内核线程)、进入调度器
+│   │
+│   ├── proc/                         # 进程管理与调度（Lab5 重点）
+│   │   ├── proc.c                    # proc_table/状态机/create/exit/wait/yield/sleep&wakeup/scheduler
+│   │   └── swtch.S                   # 上下文切换：保存/恢复 context（被 scheduler 调用）
+│   │
+│   ├── trap/                         # trap 框架：异常/中断入口与分发
+│   │   ├── trap.S                    # trap 入口向量：保存现场→调用 C→恢复→sret
+│   │   └── trap_kernel.c             # 中断/异常处理与分发（为时钟 tick、抢占/让出等提供支撑）
+│   │
+│   ├── dev/                          # 设备驱动
+│   │   ├── uart.c                    # 串口 16550：输出/输入/中断
+│   │   ├── plic.c                    # PLIC：外部中断 claim/complete
+│   │   ├── timer.c                   # 定时器：tick 维护（调度/时间片的时钟来源）
+│   │   └── console.c                 # console 抽象（通常薄封装 UART）
+│   │
+│   ├── mem/                          # 内存管理（实验继承/复用）
+│   │   ├── pmem.c                    # 物理页分配/释放（进程栈、页表等都依赖它）
+│   │   └── vmem.c                    # Sv39 页表/映射、启用分页
+│   │
+│   └── lib/                          # 基础库
+│       ├── print.c                   # printf/panic
+│       ├── spinlock.c                # 自旋锁（proc/irq 关键同步原语）
+│       └── string.c                  # memset/memcpy 等
+│
+├── include/                          # 头文件接口（与 kernel 子系统一一对应）
+│   ├── proc/ (proc.h, cpu.h)         # struct proc/context/cpu + 调度/进程 API 声明
+│   ├── trap/ (trap.h)                # trap 相关结构/接口
+│   ├── mem/ (pmem.h, vmem.h)         # 内存接口
+│   ├── dev/ (uart.h, plic.h, ...)    # 设备接口
+│   ├── lib/ (lock.h, print.h, ...)   # 锁/输出/字符串接口
+│   ├── riscv.h / memlayout.h / common.h
+│   └── CSR/位定义、地址布局、基础类型与宏
+│
+├── README.md / Report.md             # 说明与实验报告
+├── picture/                          # 实验截图
+├── 操作系统实践PPT-进程管理与调度.pdf  # 实验资料
+├── 从零构建操作系统-学生指导手册.(pdf/docx) # 参考资料
+└── kernel-qemu / kernel.bin          # 构建产物（可执行镜像/裸二进制）
 ```
 
-## 5. 常见问题
-
-1. **`exit_process` 报告“noreturn function does return”**  
-   - 已在实现中通过死循环/`panic` 保证不返回；若自己修改需保持 `noreturn` 语义。
-2. **QEMU 无输出或只显示 Hart1 idle**  
-   - Hart1 设计为 idle，调度仅在 Hart0 进行；请查看 Hart0 的日志。
-3. **编译时 `unused-but-set-variable`**  
-   - 使用 `-Werror` 时必须移除未使用变量或将其 `__attribute__((unused))`。
-
-## 6. 后续扩展建议
+## 5. 后续扩展
 
 - 实现 `sleep/wakeup`，让 `wait_process` 不再忙等。
 - 支持优先级/多级反馈队列等调度算法。

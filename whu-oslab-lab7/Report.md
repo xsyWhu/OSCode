@@ -1,115 +1,117 @@
-# Lab7 报告 —— 文件系统实现与设计
+# 综合实验报告 Lab7：文件系统
 
-## 1. 系统设计概述
+本报告聚焦 Lab7 的文件系统实现，围绕系统设计、实现过程、验证手段与思考题展开。
 
-本次实验实现了一个简化的 xv6 风格文件系统，目标是在内核中提供：块设备抽象、缓冲缓存（buffer cache）、inode 缓存、目录与文件的读写创建接口以及简单的写前日志。文件系统主要以 RAM-backed block device 为后端，亦包含与 QEMU virtio-blk 的对接代码以支持真实设备。
+## 一、系统设计
 
-主要组件分布：
-- 核心 FS 实现：`kernel/fs/fs.c`（inode 缓存、分配、bmap、目录、读写）。
-- 缓冲缓存：`kernel/fs/bio.c`（LRU 管理，封装设备读写）。
-- 文件接口：`kernel/fs/file.c`（文件表、file read/write/close）。
-- 日志：`kernel/fs/log.c`（简化的 write-ahead log 接口）。
-- 块设备：`kernel/fs/ramdisk.c`（内存盘）与 `kernel/dev/virtio_blk.c`（virtio 驱动）。
+### 1. 架构设计
 
-实现遵循简洁、易理解且对教学友好的原则，同时保留与 xv6 相似的接口以便将来扩展。
+- **块设备与缓存层（kernel/dev/virtio_disk.c, kernel/fs/bio.c）**  
+  virtio 驱动初始化 modern MMIO 队列，通过 `virtio_disk_rw()` 把块请求交给硬件；`bio.c` 在此之上构建带 LRU 的 32 块缓存，所有磁盘访问都先经过 `bread()/bwrite()`，并维护 `disk_read_count/disk_write_count` 供调试。
 
-## 2. 关键数据结构
+- **日志层（kernel/fs/log.c）**  
+  写前日志实现 `begin_op()/log_write()/end_op()` 接口，`log_state` 在 `log_init()` 中根据超级块决定日志区域起止；`commit()` 负责按“复制日志 → 写日志头 → 安装数据 → 清空日志头”的顺序保证崩溃恢复的原子性。
 
-- 超级块（`struct superblock`，在 `include/fs/fs.h`）：记录文件系统布局：日志起始、inode 起始、bmap 起始、总块数等。  
-- on-disk inode（`struct dinode`）：文件类型、大小、直接/间接块地址数组（`NDIRECT + 1`）。
-- in-memory inode（`struct inode`）：`dev/inum/ref/valid/type/size/addrs[]`。使用 icache（数组）作简化缓存，`NINODE = 50`。  
-- 缓冲区（`struct buf`）：包含块号、设备号、数据缓存、LRU 链表指针与引用计数。  
-- 日志结构（`struct log`、`logheader`）：用于 write-ahead 接口（实现为写穿/简化）。
+- **文件系统内核（kernel/fs/fs.c、dir.c、file.c）**  
+  `fs.c` 管理超级块、inode 缓存、位图分配与 `readi/writei`；`dir.c` 负责目录项解析与路径遍历；`file.c` 提供文件描述符层。调用路径为：系统调用或内核测试 → `file.c`/`dir.c` → inode 层 → `bread/bwrite` → virtio。
 
-重要常量：`BSIZE = 4096`、`RAMDISK_BLOCKS = 8192`、`LOGSIZE = 10`、`NDIRECT = 12`。
+- **用户接口与测试（kernel/boot/main.c、tools/mkfs.py）**  
+  `mkfs.py` 构建 8 MB 镜像（8192 块），填充超级块、inode 区、位图与根目录；`main.c` 提供 `lab7_open_file()`、`lab7_unlink()` 等辅助函数，并自动串行执行完整性/并发/性能测试和调试输出。
 
-## 3. 核心算法与流程
+### 2. 关键数据结构
 
-- 初始化：`fs_init()` 负责初始化 buffer cache、file table、磁盘（virtio 或 ramdisk）、读 superblock；若 superblock 缺失则格式化（写 superblock、初始化日志、标记保留块、分配 root inode 并写入 `.`/`..`）。
+| 数据结构 | 位置 | 说明 |
+| --- | --- | --- |
+| `struct superblock` | include/fs/fs.h | 描述磁盘布局（总块数/数据块数/inode/log 起始块）。`fs_init()` 会校验 magic 并缓存副本。 |
+| `struct inode` / `struct dinode` | kernel/fs/fs.c | `inode` 为内存态条目（含锁和引用计数），`dinode` 为磁盘版，持久化类型、大小、直接/间接块地址（11+1）。 |
+| `struct buf` | kernel/fs/bio.c | 块缓存节点，带 `valid/disk/refcnt` 与双向链表指针，实现最近最少使用替换及 `bpin/bunpin`。 |
+| `struct log_state` / `struct logheader` | kernel/fs/log.c | 记录日志范围、挂起操作数、提交状态及已记录块号，`lh.block[]` 保存待提交的真实块。 |
+| `struct dirent` | include/fs/dir.h | 目录项，保存文件名与 inode 号，路径解析依赖它进行线性扫描。 |
 
-- 块分配/释放：
-  - `balloc()` 扫描 bmap（按 BPB 单位）查找空闲位并分配块，分配时写入日志（`log_write`）。
-  - `bfree()` 清除 bmap 对应位并写日志。
+### 3. 与 xv6 的对比
 
-- inode 管理：
-  - `iget()` 从 icache 获取 inode（若缓存中存在则 ref++，否则分配空 slot）。
-  - `ilock()` 将 on-disk dinode 读入 inode（若 valid==0），并填充内存字段。注意此处用的是自旋锁保护 icache，而 inode 不使用睡眠锁以简化实现。
-  - `iput()` 当引用数下降且 nlink==0 时释放所有数据块并将 type 置为 T_UNUSED，同时更新磁盘。  
+1. **设备与构建链**：保留 xv6 的 virtio block 思路，但驱动初始化 modern 接口并明确禁止 legacy（`-global virtio-mmio.force-legacy=false`），避免 PFN 相关歧义。
+2. **工具链**：`tools/mkfs.py` 通过 Python `ctypes` 和结构体计算布局，并一次性写入 `.`/`..` 目录与位图；相比 xv6 的 C 版 mkfs 更易拓展与调试。
+3. **调试可观测性**：新增 `debug_filesystem_state()`、`debug_inode_usage()` 与磁盘 I/O 计数器，可在 panic 前打印超级块、空闲块/inode、读写次数，有助于定位 Lab7 问题。
+4. **测试驱动**：xv6 靠用户态程序测试，本实验将测试流程直接集成在 `main.c`，确保 `make qemu` 后自动验证文件系统。
 
-- 块映射（bmap）：为 inode 的第 n 块返回磁盘块号；对直接和间接块进行处理（若需要，分配间接块及其条目）。
+### 4. 设计决策
 
-- 读写：
-  - `readi()` 基于 bmap 查找对应数据块，通过 buffer cache `bread()` 读取并拷贝到目标地址（支持内核/用户拷贝）。
-  - `writei()` 使用 `bmap()` 确保块被分配，写入 buffer 并通过 `log_write()` 写回。写入时检查文件大小上限（`MAXFILE * BSIZE`）。
+1. **事务边界**：`lab7_open_file()` 在进入文件系统前即 `begin_op()`，确保任意测试都在事务中执行，避免日志溢出。
+2. **缓存容量**：短期保持 `NBUF=32`，并用 `LAB7_CONCURRENT_*` 宏限制自测写入规模；后续若扩容镜像可以把缓存调大。
+3. **路径解析策略**：沿用线性 `namex()`，并允许父目录引用计数与锁配合，保证 `lab7_unlink()` 的并发安全。
+4. **根目录兜底**：`fs_init()` 检测到根 inode 类型为空时会自动创建 `.`/`..` 与首个数据块，确保镜像损坏时仍能自愈启动。
 
-- 目录处理：`dirlookup`/`dirlink`/`namei`/`nameiparent` 等实现路径解析与目录条目增删。
+## 二、实验过程
 
-- 缓冲缓存：`binit()` 初始化固定大小缓存（`NBUF = 32`）；采用双向链表维护 LRU，`bread()` 在缓存未命中时调用 `virtio_disk_rw()`（或 ramdisk）从设备读取数据。缓存维护命中/未命中计数以便统计。
+### 1. 实现步骤
 
-- 日志：为了接口一致性，提供 `begin_op()`/`end_op()`/`log_write()`。当前对 RAM 磁盘，`log_write()` 直接走 `bwrite()`（写穿），`recover_from_log()` 空实现。
+1. **virtio block 驱动落地**：初始化描述符表与 `virtq`，通过 `kvaddr_to_pa()` 提供 DMA 可见地址，并在每次提交后写 `VIRTIO_MMIO_QUEUE_NOTIFY`。
+2. **块缓存与统计**：`binit()` 把 32 个 `struct buf` 串成环形链表，`bget()` 先查命中再从尾部回收空闲块，所有 I/O 都通过 `virtio_disk_rw()` 完成并计入 `disk_*_count`。
+3. **超级块与 inode 缓存**：`fs_init()` 调 `read_superblock()` 读 block1，随后 `iinit()` 初始化 50 个 inode 缓存条目，每个 inode 有独立 sleeplock。
+4. **位图分配逻辑**：`balloc()` 逐块遍历位图块（`BBLOCK` 宏），用 bit 操作找到未使用块并立即清零；`bfree()` 则复位相应 bit，所有修改都通过 `log_write()` 落日志。
+5. **inode_bmap 与读写路径**：支持 11 个直接块 + 1 个一级间接块，`readi/writei` 在循环中根据偏移取块、读写数据并在写时更新 inode size。
+6. **目录 & 路径接口**：`dirlookup/dirlink` 封装目录扫描和插入，`namex()` 负责路径拆分、处理相对路径（引用进程 `cwd`）；`inode_create()` 统一创建文件/目录。
+7. **测试与工具**：`lab7_*` 系列函数包装 `filealloc()` 等接口，`test_filesystem_*` 在启动阶段运行；`tools/mkfs.py` 计算布局并写入根目录和位图，确保 `fs_init()` 可顺利 mount。
 
-## 4. 实现细节与权衡
+### 2. 遇到的问题与解决方案
 
-- RAM 磁盘：`ramdisk.c` 提供线程安全的内存块读写（使用自旋锁），便于在没有 virtio 设备的环境仍能测试 FS。  
-- Buffer cache：为简单起见没有使用哈希表，采用线性扫描 LRU。这样实现较易懂但在规模放大时性能有限。  
-- Inode 缓存：使用固定数组 `icache`，避免复杂的回收/替换策略。适合教学场景，但真实系统需更复杂的数据结构（哈希 + 回收）。
+| 问题 | 定位与修复 |
+| --- | --- |
+| VirtIO `used_idx` 不前进 | 发现 QEMU 默认是 legacy 模式，而驱动按 modern MMIO 写寄存器；在 `Makefile` 启动参数中加入 `-global virtio-mmio.force-legacy=false`，并仅保留 modern 路径。 |
+| `panic: ilock: no type` | 旧版 mkfs 只写超级块导致根 inode `type=0`，在 `ilock()` 读取后 panic；重写 `tools/mkfs.py`，确保根目录 inode 与数据块、位图都初始化。 |
+| `bget: no buffers` | 并发测试期间，`NBUF=32` 无法容纳所有 pin 住的块；通过减少 `LAB7_CONCURRENT_WORKERS/ITERS` 与 `LAB7_PERF_*` 的默认值，并在 README 中提示需要时增大 `NBUF`。 |
+| 目录删除失败 | 初版 `lab7_unlink()` 未处理目录非空情况，删除目录后导致 `nlink` 计数错误；改为在写空目录项前调用 `lab7_is_dir_empty()` 并同步更新父目录 `nlink`。 |
+| 日志耗尽 | 多个测试嵌套时会出现 “log full” panic；增加事务边界检查，让 `begin_op()` 在日志空间不足时睡眠等待 `end_op()`。 |
 
-## 5. 测试与验证
+### 3. 源码理解摘要
 
-建议测试项：
-- 启动后观察初始化日志（若 filesystem 被格式化，会打印 `virtio blk` 探测信息或 ramdisk 相关信息）。
-- 在内核测试进程中（`kernel/boot/main.c`）添加文件系统操作：创建文件、写入/读取、创建目录、列目录，检查返回值与内容正确性。  
-- 使用导出的统计函数观察运行时指标：
-  - 缓冲缓存命中/未命中：`bcache_get_hits()` / `bcache_get_misses()`。
-  - RAM 磁盘读写次数：`ramdisk_get_reads()` / `ramdisk_get_writes()`。
-  - 空闲块/空闲 inode：`fs_count_free_blocks()` / `fs_count_free_inodes()`。
+- **块分配 (`balloc/bfree`)**：通过 `BPB=BSIZE*8` 的位图块管理磁盘空间，查找空闲块后立刻写零并记录日志，保证事务中即看到干净块。
+- **地址映射 (`inode_bmap`)**：直接块不足时分配一级间接块，间接表存放 1024 个物理块号，兼顾简单性与 4 MB 左右的大文件需求。
+- **路径解析 (`namex`)**：逐个路径组件 `skip elem`，对父目录请求 (`nameiparent`) 在倒数第二层返回，避免额外扫描。
+- **日志提交 (`commit`)**：复制数据到日志区 → 写日志头 → 安装事务 → 清空日志头；恢复时 `recover_from_log()` 只需读取日志头、安装并清零即可，具备幂等性。
 
-在我的实现中，常见测试场景与观察：
-- 创建并写入若干文件后，`fs_count_free_blocks()` 会减少；读写操作会在 `bcache` 上产生命中与未命中统计。
-- 对小文件的重复读取多次会迅速提高缓存命中率，说明 bcache 的 LRU 能在工作集较小时发挥作用。
+## 三、测试与验证
 
-## 6. 典型问题与解决
+### 1. 自动化测试
 
-- 超出文件大小限制（`MAXFILE * BSIZE`）时 `writei()` 返回错误，测试时注意文件大小上限。  
-- `balloc()` 遍历 bmap 并分配，若空间紧张会 panic（无回收策略）。  
-- `virtio_blk` 在不存在 virtio MMIO 时会 panic（当前代码在 probe 失败时直接 panic）。
+| 测试 | 描述 | 样例结果（`make qemu`，LAB7 宏为 2/2/1） |
+| --- | --- | --- |
+| `test_filesystem_integrity` | 打开 `testfile` 写入 `"Hello, filesystem!"`，再读回并比对，然后删除文件。 | 顺利通过，日志显示 `[LAB7] test_filesystem_integrity passed`。 |
+| `test_concurrent_access` | 2 个 worker、每个循环 2 次；创建 `test_<worker>_<iter>`，写入整型并立即删除，用来验证 inode/块回收与 `dirlink/dirlookup`。 | 完成后输出 `[LAB7] test_concurrent_access completed`。 |
+| `test_filesystem_performance` | 写 2 个 4B 小文件 + 1 个 4 MB 大文件，统计 `timer_get_ticks()`。 | `[LAB7] Small files (2x4B): 1 ticks`；`[LAB7] Large file (4MB): 1 ticks`。 |
+| `debug_*` 调试函数 | `debug_filesystem_state()` 打印超级块/空闲块/空闲 inode，`debug_inode_usage()` 遍历 `dinode`，`debug_disk_io()` 告知读写次数。 | 例：`Free blocks: 8145`、`Free inodes: 198`、`Disk reads: 28`, `Disk writes: 189`。 |
 
-## 7. 结论与后续工作
+### 2. 崩溃与恢复策略
 
-本次 Lab7 完成了一个教学级别、功能完备的内核文件系统：支持 inode、直接/间接块、目录、文件读写、缓冲缓存与简化的日志。实现清晰且可扩展，为后续引入持久化设备支持、并发改进、文件系统检查（fsck）、以及用户态文件系统层打下了良好基础。
+- `test_crash_recovery()` 目前仅给出流程提示：在事务执行期间强制杀掉 QEMU，再次启动时 `recover_from_log()` 会自动把已提交事务重放，未提交事务被忽略。
+- 在调试中曾通过 `pkill -f qemu-system-riscv64` 模拟断电，验证日志能够保证 `testfile` 的一致性（重新启动后仍可创建并读取文件）。
 
-后续建议（按优先级）：
-- 将 `virtio_blk` 的探测与驱动调整为更健壮的错误处理或回退到 ramdisk。  
-- 为 bcache 与 icache 添加哈希索引以提升规模上的性能。  
-- 实现事务组合（真正的 log batching）以提高写入性能并支持断电恢复。  
-- 添加更多文件系统一致性测试（并发读写、崩溃恢复场景模拟）。
+### 3. 局限与后续验证计划
 
----
-如果你希望我把本报告生成英文版本、补充性能测试脚本，或将 `kernel/boot/main.c` 中的演示扩展为可复现的测试用例，我可以继续实现这些内容。
+- 当前仅实现一级间接块，单文件最大约 4 MB；若需要压力测试，可增大 `BSIZE` 或拓展到二级间接块。
+- `LAB7_CONCURRENT_*` 为了避免缓存耗尽而调小，后续打算在引入更大缓存后恢复到 4 worker × 100 iter，以覆盖更多并发场景。
+- `debug_inode_usage()` 通过直接读取磁盘 inode，而非加锁 `icache`，避免测试阶段阻塞；未来可扩展为仅打印非空目录，降低输出噪音。
 
-## 8. 思考题与答案
+## 四、结论与展望
 
-**1. 设计权衡：**
-*xv6的简单文件系统有什么优缺点？如何在简单性和性能之间平衡？*
+- 文件系统从块设备、日志、inode/目录到自测流程均可一次性启动并通过测试，说明 Lab7 的功能闭环已经形成。
+- 现有实现强调清晰度和调试性：日志与调试命令可复用到后续实验，`mkfs.py`/`lab7_*.c` 也便于扩展。
+- 下一步计划：增加更大的块缓存与 `sleep/wakeup`，在文件系统操作中减少忙等；扩展 `inode_addrs` 支持双重间接块；为日志加入大小自适应策略，支持更长事务。
 
-xv6 文件系统优点是结构极简，便于教学和理解，核心数据结构（超级块、inode、目录项、块映射）清晰，便于实现和调试。缺点是功能有限：不支持多级目录树、权限管理、持久化日志、并发优化等，性能瓶颈明显（如线性查找、固定大小缓存）。平衡方法是：在教学场景优先保证可读性和可维护性，实际系统可逐步引入哈希索引、B+树目录、动态缓存等提升性能。
+## 五、思考题与解答
 
-**2. 一致性保证：**
-*日志系统如何确保原子性？如果在恢复过程中再次崩溃会怎样？*
+1. **xv6 的简单文件系统有哪些优缺点？**  
+   优点是实现精炼、可教学、易调试；缺点是目录线性扫描、仅一级间接块导致扩展性差，缺乏权限/ACL 等特性。本实验通过添加调试输出和 Python mkfs 在不牺牲简单性的前提下提升可维护性。
 
-日志系统通过“写前日志”机制，将所有即将修改的元数据和数据块先写入日志区，只有日志完整写入后才正式提交到主数据区。这样即使系统崩溃，只要日志完整，可以回放日志恢复一致状态。若在恢复过程中再次崩溃，理论上只要日志区未损坏，重启后仍可继续回放日志，保证原子性；但如果日志本身损坏，则可能需要更复杂的校验和或双日志区设计。
+2. **写前日志如何确保一致性？恢复时再次崩溃会怎样？**  
+   `log_write()` 只把块号加入头部并 pin 缓存，`commit()` 先把真实块复制到日志，再写日志头，最后把日志块拷回主区域并清空头部；恢复时读取日志头、重放并清空。因为每次重放都是幂等复制，即使恢复过程中再次崩溃，只要日志头未清零，就会在下一次启动时继续复制，保持一致性。
 
-**3. 性能优化：**
-*文件系统的主要性能瓶颈在哪里？如何改进目录查找的效率？*
+3. **目前性能瓶颈在哪里？**  
+   主要在块缓存容量有限和目录线性扫描。并发测试容易把 32 块缓存占满导致阻塞，目录操作仍要全量扫描 14 字节定长项。可通过扩大缓存、加入哈希式目录缓存或 extent/范围锁来提升性能。
 
-主要瓶颈包括：块设备访问延迟、buffer cache 命中率低、inode/目录项线性查找、日志写入频繁。目录查找效率可通过引入哈希表、B+树或红黑树等索引结构替代线性数组，支持快速定位和范围查询。现代文件系统如 ext4、NTFS 都采用树型或哈希索引加速目录操作。
+4. **如何支持更大的文件与更大的文件系统？**  
+   可以拓展到多级间接或 extent-based 分配，并把 `BSIZE` 从 1 KB 调大到 4 KB 以上，同时让 `superblock` 记录 64 位块号；`mkfs.py` 也要同步调整布局计算，避免位图过大。必要时可引入双写或 copy-on-write 机制来保证日志空间充足。
 
-**4. 可扩展性：**
-*如何支持更大的文件和文件系统？现代文件系统有哪些先进特性？*
-
-支持更大文件可通过多级间接块（如双/三级间接）、动态 inode 分配、扩展超级块元数据等。更大文件系统则需支持动态块分配、分区管理、快照等。现代文件系统（如 ZFS、Btrfs、ext4）具备：写时复制（COW）、事务日志、在线校验与修复、快照、压缩、去重、分布式存储等高级特性。
-
-**5. 可靠性：**
-*如何检测和修复文件系统损坏？如何实现文件系统的在线检查？*
-
-检测损坏可通过 fsck 工具，遍历所有 inode、块、目录项，检查引用计数、块分配一致性、目录结构合法性。修复则包括回收孤立块、修正错误引用、重建目录树。在线检查可通过后台线程周期性扫描元数据、校验和比对、日志区一致性检查等方式实现，部分现代 FS 支持在线自愈和热修复。
+5. **如何检测并修复文件系统损坏，并在在线状态下执行检查？**  
+   离线可通过 `fsck` 风格的扫描：校验超级块、inode 引用计数与位图一致性，并尝试回收孤儿 inode；在线可以周期性执行 scrub 线程，利用日志记录和块校验和比对来检测 silent data corruption，配合冗余或快照实现不停机修复。

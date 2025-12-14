@@ -9,6 +9,60 @@
     - **`kernel/trap/trap_kernel.c`**：时钟中断处理，递增 `ticks` 并在 Hart0 上触发 `yield()` 实现抢占。
     - **`kernel/boot/main.c`**：引导与测试驱动，启动内置测试进程 `run_all_tests()` 并在测试后启动 worker demo。
 
+- **项目目录**:
+```
+whu-oslab-lab5/
+├── Makefile / common.mk
+│   ├── 构建入口：交叉编译、链接、生成 kernel-qemu
+│   └── 常用目标：make / make qemu / make clean
+│
+├── kernel/                           # 内核源码（S-mode 为主，含少量 M-mode 启动/定时器）
+│   ├── kernel.ld                     # 链接脚本：段布局、符号导出
+│   │
+│   ├── boot/                         # 启动链路：从 entry 到进入 scheduler
+│   │   ├── entry.S                   # 最早入口：栈/基础环境
+│   │   ├── start.c                   # M-mode 早期初始化、委托、定时器初始化、mret 到 S-mode
+│   │   └── main.c                    # 内核主函数：初始化各子系统、创建/演示进程(内核线程)、进入调度器
+│   │
+│   ├── proc/                         # 进程管理与调度（Lab5 重点）
+│   │   ├── proc.c                    # proc_table/状态机/create/exit/wait/yield/sleep&wakeup/scheduler
+│   │   └── swtch.S                   # 上下文切换：保存/恢复 context（被 scheduler 调用）
+│   │
+│   ├── trap/                         # trap 框架：异常/中断入口与分发
+│   │   ├── trap.S                    # trap 入口向量：保存现场→调用 C→恢复→sret
+│   │   └── trap_kernel.c             # 中断/异常处理与分发（为时钟 tick、抢占/让出等提供支撑）
+│   │
+│   ├── dev/                          # 设备驱动
+│   │   ├── uart.c                    # 串口 16550：输出/输入/中断
+│   │   ├── plic.c                    # PLIC：外部中断 claim/complete
+│   │   ├── timer.c                   # 定时器：tick 维护（调度/时间片的时钟来源）
+│   │   └── console.c                 # console 抽象（通常薄封装 UART）
+│   │
+│   ├── mem/                          # 内存管理（实验继承/复用）
+│   │   ├── pmem.c                    # 物理页分配/释放（进程栈、页表等都依赖它）
+│   │   └── vmem.c                    # Sv39 页表/映射、启用分页
+│   │
+│   └── lib/                          # 基础库
+│       ├── print.c                   # printf/panic
+│       ├── spinlock.c                # 自旋锁（proc/irq 关键同步原语）
+│       └── string.c                  # memset/memcpy 等
+│
+├── include/                          # 头文件接口（与 kernel 子系统一一对应）
+│   ├── proc/ (proc.h, cpu.h)         # struct proc/context/cpu + 调度/进程 API 声明
+│   ├── trap/ (trap.h)                # trap 相关结构/接口
+│   ├── mem/ (pmem.h, vmem.h)         # 内存接口
+│   ├── dev/ (uart.h, plic.h, ...)    # 设备接口
+│   ├── lib/ (lock.h, print.h, ...)   # 锁/输出/字符串接口
+│   ├── riscv.h / memlayout.h / common.h
+│   └── CSR/位定义、地址布局、基础类型与宏
+│
+├── README.md / Report.md             # 说明与实验报告
+├── picture/                          # 实验截图
+├── 操作系统实践PPT-进程管理与调度.pdf  # 实验资料
+├── 从零构建操作系统-学生指导手册.(pdf/docx) # 参考资料
+└── kernel-qemu / kernel.bin          # 构建产物（可执行镜像/裸二进制）
+```
+
 - **关键数据结构**：
   - `struct context` (`include/proc/proc.h`): 保存上下文寄存器，用于 `swtch()` 的保存与恢复。
   - `enum proc_state` (`include/proc/proc.h`): 进程状态集合：`UNUSED`, `SLEEPING`, `RUNNABLE`, `RUNNING`, `ZOMBIE`。
@@ -91,14 +145,6 @@
 
 ---
 
-附：关键源码路径回顾：
-- `kernel/proc/proc.c`  — 进程管理与调度实现
-- `kernel/proc/swtch.S` — 上下文切换汇编
-- `kernel/trap/trap_kernel.c` — 时钟中断与中断处理
-- `kernel/boot/main.c` — 启动与测试驱动
-
-（请在真实运行后补充“性能数据”与 `picture/` 中的截图文件名）
-
 ## **思考题与解答**
 
 1. 进程模型：
@@ -136,5 +182,3 @@
      - 使用 per-core runqueue 与轻量锁（或无锁结构），在每核上运行本地调度器以减少全局争用；保留全局或分区式调度器以处理全局策略。
    - 如何实现负载均衡？
      - 定期收集每核负载信息并进行任务迁移（work-stealing 或主动迁移），考虑亲和性与缓存热度，迁移策略需权衡迁移成本与负载均衡收益。
-
-以上思路既包含理论说明，也给出可落地的实现建议；在后续扩展时可以逐步引入 COW、优先级队列、多核 runqueue 与资源配额机制，将实验内核一步步拓展为更完整的调度与资源管理子系统。

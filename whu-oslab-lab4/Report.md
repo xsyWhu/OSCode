@@ -49,10 +49,23 @@
 | 时钟中断不断重入导致栈溢出 | 未清除 `sip.SSIP` 导致 `kernel_vector` 重入 | 在 case1 中执行 `w_sip(r_sip() & ~2)` 手动清零 SSIP，再调用 `timer_interrupt_handler()`。 |
 | 触发异常后 PC 未恢复 | 未将更新后的 `sepc`/`sstatus` 写回 | 在 `trap_kernel_handler()` 末尾统一 `w_sepc(tf.sepc)`、`w_sstatus(tf.sstatus)`，如果处理过程中修改了 CSR，返回地址就会生效。 |
 
-### 源码理解总结
-- `kernel_vector`+`trap_kernel_handler()` 构成“硬件无关 + 业务逻辑”双层结构：汇编层只承担寄存器 Save/Restore，C 层进行 `scause` 解析和分派，后续扩展用户态异常（如 `ecall`）时只需在 C 层修改。
-- `external_interrupt_handler()` 先 Claim 后查表，再 Complete，符合 PLIC 规范，也让驱动层可以独立于 trap 核心开发；未注册 IRQ 会打印提示，方便调试。
-- `timer_vector` 使用 `mscratch` 存储 `MTIMECMP` 地址和间隔，避免每次中断都重新计算地址；将 S-mode 通知方式固定为“软件中断”也让 S-mode 只需侦测 `scause=1` 即可。
+### 源码理解
+- `kernel_vector`（汇编）做了两件事：把用户/内核的通用寄存器压栈，然后把 CSR（比如 `sepc`/`sstatus`/`scause`/`stval`）装到一个 `trapframe` 里，最后跳到 C 函数 `trap_kernel_handler()`；返回时再把寄存器恢复。也就是说，汇编负责“搬东西”，C 层负责“看东西并做决定”。
+
+- `trap_kernel_handler()` 的工作流程很直接：先看 `scause`，分两类处理——中断（interrupt）和异常（exception）。
+   - 如果是外设中断（external interrupt），会走 `external_interrupt_handler()`：它调用 `plic_claim()` 得到 IRQ 编号，然后查 `irq_table[irq]`，如果有注册的 handler 就调用，没有就打印一条“Unknown external interrupt”的提示，最后调用 `plic_complete(irq)` 完成中断。这个顺序（claim→dispatch→complete）是标准流程。
+   - 如果是时钟（timer）中断，最终会走 `timer_interrupt_handler()`，而 `timer_vector`（M-mode 的入口）利用 `mscratch` 和 `MTIMECMP` 把下一次中断安排好，然后通过写 `sip.SSIP` 或相关CSR把事件转到 S-mode，由上面的流程收到并处理。
+
+- UART 路径很简单：UART 硬件写入 RHR，UART 控制器置 pending，PLIC 上有 pending bit，S-mode 的 `external_interrupt_handler()` Claim 到 UART IRQ，查到 `uart_intr()` 并执行。`uart_intr()` 在本仓库是回显实现：读 RHR、写 THR。这种 handler 应该尽量短——长逻辑会阻塞其他中断。
+
+- 关于并发和多核：我们把 `timer_update()` 限定为 CPU0 执行，其他 hart 只读 `ticks`，这样避免了多个 hart 同时修改 `MTIMECMP` 或全局计数带来的竞争。每个 hart 都有自己的 `mscratch` / 启动栈，避免在中断时互相干扰。
+
+- 调试提示（遇到无中断或回显失败按顺序排查）：
+   1. 确认 `uart_init()` 被调用（在 `kernel/boot/main.c` CPU0 初始化序列中）；
+   2. 确认 `trap_init()` / `trap_inithart()` 已注册并使能 UART IRQ（`register_interrupt()`、`enable_interrupt(UART_IRQ)`）；
+   3. 在 `external_interrupt_handler()` 临时打印 `plic_claim()` 的返回值，确认是否有 pending IRQ；
+   4. 如果 Claim 返回 0，说明设备未发中断或者 PLIC/enable 位没设置；检查 UART 的 IER 寄存器（驱动里有使能 RX interrupt 的写操作），以及 PLIC 的优先级/阈值设置；
+   5. 避免在中断处理里做大量 `printf`：`printf` 可能会争用锁或触发再次中断，导致时序问题。确认后再把调试打印删掉。
 
 ---
 
@@ -71,9 +84,30 @@
 - `test_exception_handling()` 内置三种异常（非法指令、bad memory、S-mode ecall），每次启用一种。以非法指令为例，串口输出“Triggering illegal instruction exception...”后，由 `handle_exception()` 打印`Exception in kernel: Illegal instruction`与 `sepc/stval`，随后 `panic()` 终止。该流程验证了异常分支、信息打印与 `panic` 路径。
 
 ### 运行截图/录屏
-- `picture/lab4_timer_console.png`：展示 `test_timer_interrupt()` 的 T/`.` 输出与 tick 统计。
-- `picture/lab4_exception.png`：展示非法指令异常路径的串口日志。
-获取方式：`make qemu` 运行后，在串口上执行对应测试并保存截图。
+
+- `picture/lab4_timer_50ticks.png` — Test1：50 个 tick 观测（串口输出包含多个 `T`，并显示 Start/End tick）。
+![alt text](picture/lab4_timer_50ticks.png)
+- `picture/lab4_timer_accuracy.png` — Test2：10 tick 精度验证输出（显示 Expected/Actual 及粗略准确度）。
+![alt text](picture/lab4_timer_accuracy.png)
+- `picture/lab4_timer_watch.png` — Test3：20 tick 实时观察（串口输出由 `.` 构成的进度行）。
+![alt text](picture/lab4_timer_watch.png)
+- `picture/lab4_exception_illegal.png` — 非法指令异常（串口输出 `Illegal instruction`、`scause`/`stval` 信息）。
+![alt text](picture/lab4_exception_illegal.png)
+- `picture/lab4_exception_badmem.png` — 越界/坏内存访存异常（串口输出 Page Fault / Access Fault 信息）。
+![alt text](picture/lab4_exception_badmem.png)
+- `picture/lab4_exception_ecall.png` — S-mode `ecall` 异常日志（显示 trap 分发与处理信息）。
+![alt text](picture/lab4_exception_ecall.png)
+- `picture/lab4_interrupt_overhead.png` — `test_interrupt_overhead()` 输出（ticks_delta、cycles_delta、Avg cycles per tick）。
+![alt text](picture/lab4_interrupt_overhead.png)
+- `picture/lab4_uart-echo.png` — 我们在terminal中输入字符并成功回显的截图。
+![alt text](picture/lab4_uart-echo.png)
+
+*** 测试方法： ***
+
+```sh
+make qemu
+# 在 QEMU 串口中运行/触发相应测试（或解除 main.c 中对应注释以启用某项测试）
+```
 
 ---
 

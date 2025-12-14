@@ -42,14 +42,15 @@ int main()
         intr_on();
         printf("Interrupts enabled (sstatus.SIE = %d)\n\n", intr_get());
 
-        // 1) 时钟中断测试（三小项都在这个函数里）
-        //test_timer_interrupt();
+        // 时钟中断测试（三小项都在这个函数里）
+        test_timer_interrupt();
 
-        // 2) 异常处理测试（会触发 panic，一般单独跑，先注释）
-        test_exception_handling();
+        // 中断“开销”/tick 间隔粗略测量
+        test_interrupt_overhead();
 
-        // 3) 中断“开销”/tick 间隔粗略测量
-        //test_interrupt_overhead();
+        // 异常处理测试（会触发 panic，一般单独跑，先注释）
+        //test_exception_handling();
+
         __sync_synchronize();
         started = 1;
 
@@ -217,13 +218,12 @@ void test_exception_handling(void)
     printf("========================================\n\n");
 
     // 三选一：每次只打开一个测试就行
-    // 2) 测试非法指令异常
-     trigger_illegal_instruction();
+    // 1) 测试 ecall 异常
+    trigger_ecall_from_smode();
     // 3) 测试内存访问异常
     trigger_bad_memory_access();
-    // 1) 测试 ecall 异常
-     trigger_ecall_from_smode();
-
+    // 2) 测试非法指令异常
+     trigger_illegal_instruction();
     // 理论上到不了这里，因为上面任意一个都会 panic
     printf("Exception test finished (this line should not normally be reached).\n\n");
 }
@@ -266,5 +266,5 @@ void test_interrupt_overhead(void)
     }
 
     printf("\nNOTE: 这里测的是“完整 tick 周期”的粗略开销，\n");
-    printf("      包含定时器硬件间隔 + trap 进出 + 你的 handler 代码，不是纯 trap 指令成本。\n\n");
+    printf("      包含定时器硬件间隔 + trap 进出 + handler 代码，不是纯 trap 指令成本。\n\n");
 }

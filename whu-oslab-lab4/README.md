@@ -20,7 +20,7 @@
 ## 构建与运行
 
 1. **依赖**  
-   - 任一可用于裸机 RISC-V 的交叉工具链：`riscv64-unknown-elf-gcc` 或 `riscv64-linux-gnu-gcc`。  
+   - RISC-V 的交叉工具链：`riscv64-unknown-elf-gcc` 或 `riscv64-linux-gnu-gcc`。  
    - QEMU 5.0+，需包含 `qemu-system-riscv64`。  
    - GNU make。
 
@@ -36,7 +36,7 @@
    make qemu-gdb   # QEMU 等待 GDB 连入 (TCP 1234)
    ```
 
-4. **GDB 调试**（可选）  
+4. **GDB 调试**
    ```sh
    riscv64-unknown-elf-gdb kernel/kernel.elf
    (gdb) target remote :1234
@@ -48,29 +48,24 @@
 
 ## 实验功能与验证
 
-1. **定时器与 ticks**  
-   - 在 `main()` 中调用 `test_timer_interrupt()`，串口会输出 3 组测试：50 次 tick 观测、10 tick 精度验证、20 tick 实时监控。  
-   - `timer_get_ticks()` 读取受自旋锁保护的计数，验证 M-mode → S-mode 委托与 `timer_update()` 生效。
+1. **定时器与 ticks (`test_timer_interrupt`)**
+   - 在 `kernel/boot/main.c` 中实现了 `test_timer_interrupt()`，包含三项子测试：
+      - Test 1 — 观察 50 个 tick（串口输出 `T` 表示每个 tick），统计起止 tick；
+      - Test 2 — 精度验证（等待 10 tick，比较实际 ticks 数量）；
+      - Test 3 — 实时观察 20 个 tick（串口输出 `.` 作为进度）。
+   - 注意：`main()` 中对该函数的调用被注释掉（可按需解除注释以运行）。
 
-2. **异常处理**  
-   - `test_exception_handling()` 可触发非法指令、越界访存和 S-mode `ecall`，`handle_exception()` 会打印 `scause/stval` 并 `panic`，用于检查异常路径。
+2. **异常处理 (`test_exception_handling`)**
+   - `test_exception_handling()` 在 `main.c` 中实现并在当前 `main()` 默认被调用（其余测试被注释）。
+   - 本函数包含三种触发器（请每次只启用一项以便观察对应输出）：
+      - `trigger_illegal_instruction()` — 注入无效指令以触发 Illegal Instruction 异常；
+      - `trigger_bad_memory_access()` — 访问不可映射地址以触发 Page Fault/Access Fault；
+      - `trigger_ecall_from_smode()` — 在 S 模式执行 `ecall` 以触发环境调用异常。
+   - 以上任意异常会由 `trap_kernel_handler()` 路径打印 `scause/stval` 等信息并最终 `panic()`，便于验证异常处理链路。
 
-3. **外设中断**  
-   - UART 中断由 `register_interrupt(UART_IRQ, uart_intr)` 注册。运行 `make qemu` 后在串口敲击键盘即可回显，证明 PLIC Claim/Complete、使能开关正常。
+3. **外设中断（UART 等）**
+   - UART 中断由驱动通过 `register_interrupt(UART_IRQ, uart_intr)` 注册并由 PLIC 分发；键入字符后应在串口看到回显，证明 Claim/Complete 与中断使能工作正常。
 
-4. **性能观测**  
-   - `test_interrupt_overhead()` 在等待 20 个 tick 的同时读取 `r_time()`，输出平均 tick 间隔（约 1e6 cycle），用于演示 trap 处理开销评估方法。
-
----
-
-## 常见问题与调试建议
-
-- **无中断输出**：确认 `make` 后重新运行，确保 `start.c` 中的 `w_mideleg/mideleg`、`w_sie()` 未被覆盖；可在 `trap_kernel_handler()` 中暂时打印 `scause`。
-- **PLIC Claim 恒为 0**：表明没有 pending IRQ，检查 `enable_interrupt(UART_IRQ)` 是否在 `trap_inithart()` 执行，或 UART 是否开启接收中断。
-- **时钟停止增长**：可能是 `timer_vector` 未正确写入 `mscratch` 或 `INTERVAL` 过小导致溢出。确认 `timer_init()` 在每个 hart 调用且 `CLINT_MTIMECMP` 正确更新。
-- **异常未触发**：确保 `test_exception_handling()` 中只启用一项测试，避免在第一次 panic 后继续执行。
-
-如需提交验收，请提供：
-1. `make qemu` 的完整串口日志（包含 tick/exception 测试）。  
-2. `Report.md`（本仓库已更新）。  
-3. 触发异常或 tick 运行时的截图/录像（可按报告说明生成）。
+4. **中断开销粗测 (`test_interrupt_overhead`)**
+   - `test_interrupt_overhead()` 等待固定数量的 tick（源码中为 20），并用 `r_time()` 计时以输出 tick 周期的平均 cycle 数，作为 trap/处理中断开销的粗略估计。
+   - `main()` 中对该函数的调用同样被注释，可按需启用。

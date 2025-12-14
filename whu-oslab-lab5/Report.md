@@ -77,7 +77,7 @@ whu-oslab-lab5/
 
 - **设计决策理由**：
   - 先实现内核线程（kernel threads），确保上下文切换与抢占正确，再扩展到用户态，降低实现复杂度与调试成本。
-  - 将 tick 更新与主要调度逻辑集中在 Hart0，便于观测与复现调度行为（实验平台为多 hart，但以单 hart 调度为主）。
+  - 将 tick 更新与主要调度逻辑集中在 Hart0，便于观测与复现调度行为。
   - 集成测试驱动 `run_all_tests()`，通过进程形式依次运行测试用例，确保实现的可验证性与复现性。
 
 ## **实验过程**
@@ -90,9 +90,20 @@ whu-oslab-lab5/
   5. 调整日志与打印频率，避免输出刷屏，加入 `[TEST]` 前缀便于日志过滤。
 
 - **遇到的问题与解决方案**：
-  - `exit_process` 被标注为 `noreturn`，但编译器仍报“noreturn function does return”：在 `panic()` 后加入死循环以保证控制流不返回。
-  - 测试与 demo 输出过多导致难以阅读：在 worker 中使用 `last_report` 控制打印频率（例如每 100 次迭代打印一次），并为测试添加统一前缀。
-  - `-Werror` 下因未使用变量导致编译失败：移除或标注未使用变量（或使用 `__attribute__((unused))`）以消除警告。
+  - 上下文切换后寄存器值异常（寄存器破坏/返回异常）。
+    - 问题：进程恢复后寄存器值错误、返回地址错乱或立即崩溃。 
+    - 成因：`struct context` 与 `swtch.S` 中保存/恢复寄存器顺序/字段不一致以及 `swtch.S` 保存的寄存器集合不完整。 
+    - 解决：确保 `include/proc/proc.h` 中 `struct context` 字段顺序严格对应 `kernel/proc/swtch.S` 中的保存顺序。
+
+  - sleep/wakeup 无效（进程一直阻塞或无法被唤醒）。
+    - 症状：被 `sleep(chan)` 的进程不再变成 `RUNNABLE`，或 `wakeup(chan)` 没有效果。 
+    - 成因：睡眠/唤醒使用的 channel 不一致、在未持锁的情况下修改状态或错把 `wakeup` 调用了错误的条件分支。 
+    - 解决：确保 `sleep()` 在持有相应锁时变更状态并释放锁后调用 `sched()`，`wakeup()` 在持锁时扫描并改状态；检查 `kernel/proc/proc.c` 中 `sleep`/`wakeup` 实现与使用处的 channel 参数。
+
+  - 进程创建后立即退出或未运行（trampoline/entry 问题）。
+    - 症状：创建日志显示 PID 已分配但没有看到运行日志或很快变为 `ZOMBIE`。 
+    - 成因：入口函数 `proc_trampoline()` 或传入函数指针/参数设置错误，或内核栈/上下文初始化不完整。 
+    - 解决：在 `create_process()` 路径插入临时打印，验证 `context->ra`/`sepc`/`sp` 等是否正确。 确保 `proc_trampoline()` 能正确调用传入函数并在返回后调用 `exit_process()`。
 
 - **源码理解总结**：
   - `swtch()`（`kernel/proc/swtch.S`）负责保存当前进程的一组 callee-saved 寄存器并加载目标进程寄存器，C 代码只需维护 `struct context`。
@@ -101,39 +112,33 @@ whu-oslab-lab5/
 
 ## **测试与验证**
 
-- **功能测试结果（概要）**：
+- **功能测试结果**：
   - `test_process_creation`：成功创建并回收多个 `simple_task`，PID 分配与回收正常；日志显示进程创建、运行、退出序列。
   - `test_scheduler`：不同 CPU 工作强度任务（fast/medium/slow）在 Hart0 上被轮流调度，时钟中断能触发抢占切换。
   - `test_synchronization`：使用 `spinlock` 实现的生产者-消费者测试通过，`produced_total == consumed_total`。
   - `debug_proc_table`：可以打印进程表中每个 slot 的状态（`UNUSED`/`RUNNABLE`/`RUNNING`/`ZOMBIE`），用于确认进程生命周期转换正确。
 
-- **性能数据（采集方法与占位）**：
-  - 采集方法：在 QEMU 中运行 `make qemu`（或 `make qemu-gdb`），观察内置测试日志并记录各 worker 的 `iter` 与 `ticks` 值；也可在 `worker_body()` 中增加统计变量并在结束时打印汇总。
+- **性能数据**：
+  - 采集方法：在 QEMU 中运行 `make qemu`（或 `make qemu-gdb`），观察内置测试日志并记录各 worker 的 `iter` 与 `ticks` 值。
   - 推荐命令：
     ```bash
     make
     make qemu         # or `make qemu-gdb` for debugging
     ```
-  - 占位数据（请在真实运行后替换）：
-    - 测试运行耗时（wall-clock）: <待测量> 秒
-    - 平均调度切换间隔（ticks）: <待测量> ticks
-    - worker iterations（运行 10s 取样）: fast=<待测量>, medium=<待测量>, slow=<待测量>
-
-- **异常测试**：
-  - 本实验以进程调度为主，未对非法指令/访存异常做深入测试；如需运行，请在 `kernel/boot/main.c` 中恢复 Lab4 的触发函数（`trigger_illegal_instruction()` 等），并观察内核对异常的处理路径。
 
 - **运行截图 / 录屏（说明与占位）**：
-  - 建议截图点：
-    - `run_all_tests()` 开始时显示的 `[TEST]` 标记日志。
-    - `debug_proc_table` 输出展示的进程表快照。
-    - worker demo 运行中不同 `fast/medium/slow` 输出的对比。
-  - 在 QEMU（nographic）模式下，可将输出重定向到文件并用终端截屏（示例）：
-    ```bash
-    make
-    make qemu | tee qemu-output.log
-    # 然后在宿主机上截图 qemu-output.log 的关键部分或录屏终端窗口
-    ```
-  - 占位：请将生成的截图/录屏文件放到 `picture/` 目录并在此处列出文件名，例如：`picture/test_creation.png`, `picture/proc_table.png`。
+进程状态调试输出：
+![alt text](picture/lab5_debug_proc_table.png)
+进程退出与等待测试：
+![alt text](picture/lab5_test_exit_wait.png)
+进程创建测试：
+![alt text](picture/lab5_test_process_creation.png)
+调度器测试：
+![alt text](picture/lab5_test_scheduler.png)
+同步机制测试（消费者与生产者）：
+![alt text](picture/lab5_test_synchronization.png)
+Worker demo 运行截图：
+![alt text](picture/lab5_worker_demo.png)
 
 ## **结论与后续工作**
 

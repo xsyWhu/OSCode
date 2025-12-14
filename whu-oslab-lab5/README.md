@@ -36,7 +36,7 @@ whu-oslab-lab5/
 │   ├── 构建入口：交叉编译、链接、生成 kernel-qemu
 │   └── 常用目标：make / make qemu / make clean
 │
-├── kernel/                           # 内核源码（S-mode 为主，含少量 M-mode 启动/定时器）
+├── kernel/                           # 内核源码
 │   ├── kernel.ld                     # 链接脚本：段布局、符号导出
 │   │
 │   ├── boot/                         # 启动链路：从 entry 到进入 scheduler
@@ -78,13 +78,22 @@ whu-oslab-lab5/
 │
 ├── README.md / Report.md             # 说明与实验报告
 ├── picture/                          # 实验截图
-├── 操作系统实践PPT-进程管理与调度.pdf  # 实验资料
-├── 从零构建操作系统-学生指导手册.(pdf/docx) # 参考资料
 └── kernel-qemu / kernel.bin          # 构建产物（可执行镜像/裸二进制）
 ```
+## 5. 测试与验证
+### 运行与复现
 
-## 5. 后续扩展
+  - **构建并运行 QEMU**: 在工程根目录运行：
 
-- 实现 `sleep/wakeup`，让 `wait_process` 不再忙等。
-- 支持优先级/多级反馈队列等调度算法。
-- 引入用户态地址空间与系统调用，完成从 kernel thread 到 user process 的过渡。
+  ```bash
+  make
+  make qemu
+  ```
+  
+### 验证要点
+- 启动后观察串口输出，确认各测试项通过：
+  - 进程创建与退出
+  - 调度器轮转与抢占
+  - 生产者-消费者同步
+- 可通过修改 `kernel/boot/main.c` 中的测试顺序或添加新测试用例进行扩展验证。
+- *** 具体运行截图可以见picture目录 ***

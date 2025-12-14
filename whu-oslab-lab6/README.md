@@ -9,9 +9,8 @@
 - RISC-V 交叉工具链：`riscv64-unknown-elf-gcc` 或等价发行版
 - QEMU 5.0+，并启用 `virt` RISC-V 64 机器
 
-### 1.2 常用命令
+### 1.2 命令
 ```bash
-make           # 构建内核 + 用户程序，生成 kernel-qemu
 make qemu      # 以 nographic 模式启动 QEMU，自动运行内核与 init
 make clean     # 清理构建产物
 ```
@@ -19,8 +18,6 @@ make clean     # 清理构建产物
 运行后可观察到：
 1. 内核启动日志 → Lab5 调度测试 → `run_lab6_syscall_tests()` 输出（`kernel/boot/main.c`）
 2. 用户态 `init` 程序在控制台打印 `Hello from user init!`
-
-若希望单独调试系统调用，可在 QEMU 内启用 `Ctrl+ A` → `x` 退出后再次 `make qemu`。
 
 ## 2. 系统调用通路概览
 
@@ -47,7 +44,7 @@ make clean     # 清理构建产物
 
 所有 `argint/argaddr/argstr` 均来自 `kernel/syscall/syscall.c`，对越界地址立即返回 -1，保证用户态无法绕过页表。
 
-## 4. 关键模块速览
+## 4. 关键模块
 
 - **`struct trapframe` & `proc` (`include/proc/proc.h`)**：为每个进程分配独立 trapframe/page table/文件表，`proc->ctx` 继续用于调度器；`kstack` 与 `trapframe` 物理页均由 `pmem_alloc()` 提供。
 - **虚拟内存 (`kernel/mem/vmem.c`)**：新增 `proc_pagetable()`、`proc_freepagetable()`、`growproc()` 等，用于在 `fork/exec/sbrk` 中扩展或复制用户地址空间；`copyin/copyout/copyinstr` 承担内核访问用户内存的唯一入口。
@@ -62,5 +59,3 @@ make clean     # 清理构建产物
 2. `lab6_test_parameter_passing`：验证 `/dev/console` 打开失败/成功的场景、负数/空指针参数。
 3. `lab6_test_security`：向 `write`/`read` 传递非法地址/超大长度，确保 `copyin/out` 报错。
 4. `lab6_test_syscall_performance`：循环调用 `getpid` 1 万次测量 `timer_get_ticks()` 周期。
-
-默认日志位于 QEMU 控制台，可通过 `LAB6_ENABLE_SYSCALL_TESTS` 宏开关（位于 `kernel/boot/main.c` 顶部）。若需要观察系统调用轨迹，可在 `kernel/syscall/syscall.c` 中将 `debug_syscalls` 设为 1，内核会打印 `pid, syscall name, return value`。

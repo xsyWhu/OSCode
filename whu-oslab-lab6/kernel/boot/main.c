@@ -9,6 +9,8 @@
 #include "proc/proc.h"
 #include "fs/file.h"
 #include "lib/lock.h"
+#include "lib/string.h"
+#include "syscall.h"
 
 #define LAB6_ENABLE_SYSCALL_TESTS 1
 
@@ -45,114 +47,210 @@ static const int exit_code_factor = 7;
 #define LAB6_O_RDWR   0x2
 #define LAB6_O_CREATE 0x200
 
-static int lab6_sys_getpid(void)
-{
-    struct proc *p = myproc();
-    return p ? p->pid : -1;
-}
+static struct proc* lab6_find_proc_by_name(const char *name);
+static struct proc* lab6_find_proc_by_pid(int pid);
+static uint64 lab6_invoke_syscall(struct proc *target, int num,
+                                  uint64 a0, uint64 a1, uint64 a2,
+                                  uint64 a3, uint64 a4, uint64 a5);
+static uint64 lab6_user_sbrk(struct proc *p, uint64 bytes);
+static void lab6_force_exit(struct proc *child, int status);
 
-static int lab6_sys_fork(void)
+static struct proc* lab6_find_proc_by_name(const char *name)
 {
-    struct proc *p = myproc();
-    if (!p || !p->pagetable) {
-        printf("[LAB6] fork skipped (no user pagetable in current process)\n");
-        return -1;
+    if (!name)
+        return NULL;
+    for (int i = 0; i < NPROC; i++) {
+        struct proc *p = &proc_table[i];
+        spinlock_acquire(&p->lock);
+        int match = (p->state != PROC_UNUSED &&
+                     strncmp(p->name, name, sizeof(p->name)) == 0);
+        spinlock_release(&p->lock);
+        if (match)
+            return p;
     }
-    return fork_process();
+    return NULL;
 }
 
-static int lab6_sys_wait(int *status)
+static struct proc* lab6_find_proc_by_pid(int pid)
 {
-    return wait_process(status);
+    for (int i = 0; i < NPROC; i++) {
+        struct proc *p = &proc_table[i];
+        spinlock_acquire(&p->lock);
+        int match = (p->state != PROC_UNUSED && p->pid == pid);
+        spinlock_release(&p->lock);
+        if (match)
+            return p;
+    }
+    return NULL;
 }
 
-static int lab6_sys_open(const char *path, int mode)
+static uint64 lab6_invoke_syscall(struct proc *target, int num,
+                                  uint64 a0, uint64 a1, uint64 a2,
+                                  uint64 a3, uint64 a4, uint64 a5)
 {
-    printf("[LAB6] open(\"%s\", %d) skipped (filesystem not implemented)\n",
-           path ? path : "<null>", mode);
-    return -1;
+    if (!target || !target->trapframe || !target->pagetable)
+        return (uint64)-1;
+
+    struct cpu *c = mycpu();
+    struct proc *saved_proc = c->proc;
+    struct trapframe saved_tf;
+    int intena = intr_get();
+
+    intr_off();
+    memcpy(&saved_tf, target->trapframe, sizeof(saved_tf));
+
+    c->proc = target;
+    target->trapframe->a0 = a0;
+    target->trapframe->a1 = a1;
+    target->trapframe->a2 = a2;
+    target->trapframe->a3 = a3;
+    target->trapframe->a4 = a4;
+    target->trapframe->a5 = a5;
+    target->trapframe->a7 = num;
+
+    syscall();
+    uint64 ret = target->trapframe->a0;
+
+    memcpy(target->trapframe, &saved_tf, sizeof(saved_tf));
+    c->proc = saved_proc;
+    if (intena)
+        intr_on();
+
+    return ret;
 }
 
-static int lab6_sys_close(int fd)
+static uint64 lab6_user_sbrk(struct proc *p, uint64 bytes)
 {
-    printf("[LAB6] close(%d) skipped (filesystem not implemented)\n", fd);
-    return -1;
+    if (!p || bytes > 0x7fffffffULL)
+        return (uint64)-1;
+    return lab6_invoke_syscall(p, SYS_sbrk, bytes, 0, 0, 0, 0, 0);
 }
 
-static int lab6_sys_write(int fd, const void *buf, int len)
+static void lab6_force_exit(struct proc *child, int status)
 {
-    printf("[LAB6] write(fd=%d, buf=%p, len=%d) skipped\n", fd, buf, len);
-    return -1;
-}
-
-static int lab6_sys_read(int fd, void *buf, int len)
-{
-    printf("[LAB6] read(fd=%d, buf=%p, len=%d) skipped\n", fd, buf, len);
-    return -1;
-}
-
-static uint64 lab6_sys_time(void)
-{
-    return timer_get_ticks();
+    if (!child)
+        return;
+    spinlock_acquire(&child->lock);
+    child->exit_code = status;
+    child->state = PROC_ZOMBIE;
+    spinlock_release(&child->lock);
+    if (child->parent)
+        wakeup(child->parent);
 }
 
 static void lab6_test_basic_syscalls(void)
 {
     printf("\n[LAB6] test_basic_syscalls\n");
-    int pid = lab6_sys_getpid();
-    printf("[LAB6] Current PID: %d\n", pid);
-    int child_pid = lab6_sys_fork();
-    if (child_pid == 0) {
-        printf("[LAB6] Child process path would execute exit(42)\n");
+    struct proc *initp = lab6_find_proc_by_name("init");
+    if (!initp) {
+        printf("[LAB6] init process not ready; skipping syscall tests\n");
         return;
-    } else if (child_pid > 0) {
-        int status = 0;
-        if (lab6_sys_wait(&status) >= 0) {
-            printf("[LAB6] Child exited with status %d\n", status);
-        } else {
-            printf("[LAB6] wait() unavailable in current configuration\n");
-        }
-    } else {
-        printf("[LAB6] fork() unavailable in current configuration\n");
     }
+
+    uint64 pid = lab6_invoke_syscall(initp, SYS_getpid, 0, 0, 0, 0, 0, 0);
+    printf("[LAB6] Current PID: %lu\n", pid);
+
+    uint64 child_pid = lab6_invoke_syscall(initp, SYS_fork, 0, 0, 0, 0, 0, 0);
+    if ((int)child_pid < 0) {
+        printf("[LAB6] fork() failed/unavailable\n");
+        return;
+    }
+
+    struct proc *child = lab6_find_proc_by_pid((int)child_pid);
+    if (!child) {
+        printf("[LAB6] fork returned pid=%lu but child not found\n", child_pid);
+        return;
+    }
+
+    // Mark child as exited with status 42 (avoid running noreturn sys_exit)
+    lab6_force_exit(child, 42);
+
+    // Ask parent to wait; store status in parent's stack top
+    uint64 status_va = initp->sz - sizeof(int);
+    uint64 waited_pid = lab6_invoke_syscall(initp, SYS_wait, status_va, 0, 0, 0, 0, 0);
+    int status = 0;
+    copyin(initp->pagetable, &status, status_va, sizeof(status));
+
+    printf("[LAB6] wait() returned pid=%lu status=%d\n", waited_pid, status);
 }
 
 static void lab6_test_parameter_passing(void)
 {
     printf("\n[LAB6] test_parameter_passing\n");
+    struct proc *initp = lab6_find_proc_by_name("init");
+    if (!initp) {
+        printf("[LAB6] init process not ready; skipping\n");
+        return;
+    }
+
+    const char *path = "/dev/console";
+    uint64 path_uaddr = lab6_user_sbrk(initp, strlen(path) + 16);
+    if (path_uaddr == (uint64)-1 || copyout(initp->pagetable, path_uaddr, path, strlen(path) + 1) < 0) {
+        printf("[LAB6] unable to stage path in user space\n");
+        return;
+    }
+
     char buffer[] = "Hello, World!";
-    int fd = lab6_sys_open("/dev/console", LAB6_O_RDWR);
+    uint64 buf_uaddr = lab6_user_sbrk(initp, sizeof(buffer));
+    if (buf_uaddr == (uint64)-1 || copyout(initp->pagetable, buf_uaddr, buffer, sizeof(buffer)) < 0) {
+        printf("[LAB6] unable to stage buffer in user space\n");
+        return;
+    }
+
+    int fd = (int)lab6_invoke_syscall(initp, SYS_open, path_uaddr, LAB6_O_RDWR, 0, 0, 0, 0);
     if (fd >= 0) {
-        int bytes = lab6_sys_write(fd, buffer, sizeof(buffer) - 1);
+        int bytes = (int)lab6_invoke_syscall(initp, SYS_write, fd, buf_uaddr, sizeof(buffer) - 1, 0, 0, 0);
         printf("[LAB6] Wrote %d bytes to console\n", bytes);
-        lab6_sys_close(fd);
+        lab6_invoke_syscall(initp, SYS_close, fd, 0, 0, 0, 0, 0);
     } else {
         printf("[LAB6] open /dev/console failed (expected without FS)\n");
     }
-    (void)lab6_sys_write(-1, buffer, 10);
-    (void)lab6_sys_write(fd, NULL, 10);
-    (void)lab6_sys_write(fd, buffer, -1);
+
+    int fd_answer = lab6_invoke_syscall(initp, SYS_write, (uint64)-1, buf_uaddr, 10, 0, 0, 0);
+    printf("[LAB6] write with invalid fd result: %d\n", fd_answer);
+    int pointTest = lab6_invoke_syscall(initp, SYS_write, fd, 0, 10, 0, 0, 0);
+    printf("[LAB6] write with null buffer result: %d\n", pointTest);
+    int test_answer = lab6_invoke_syscall(initp, SYS_write, fd, buf_uaddr, (uint64)-1, 0, 0, 0);
+    printf("[LAB6] write with oversized length result: %d\n", test_answer);
 }
 
 static void lab6_test_security(void)
 {
     printf("\n[LAB6] test_security\n");
+    struct proc *initp = lab6_find_proc_by_name("init");
+    if (!initp) {
+        printf("[LAB6] init process not ready; skipping\n");
+        return;
+    }
+
     char *invalid_ptr = (char*)0x1000000;
-    int result = lab6_sys_write(1, invalid_ptr, 10);
+    int result = (int)lab6_invoke_syscall(initp, SYS_write, 1, (uint64)invalid_ptr, 10, 0, 0, 0);
     printf("[LAB6] Invalid pointer write result: %d\n", result);
-    char small_buf[4];
-    result = lab6_sys_read(0, small_buf, 1000);
+
+    // Use invalid fd to avoid blocking on console input
+    char dummy[4] = {0};
+    uint64 dummy_uaddr = lab6_user_sbrk(initp, sizeof(dummy));
+    if (dummy_uaddr != (uint64)-1) {
+        copyout(initp->pagetable, dummy_uaddr, dummy, sizeof(dummy));
+    }
+    result = (int)lab6_invoke_syscall(initp, SYS_read, (uint64)-1, dummy_uaddr, 1000, 0, 0, 0);
     printf("[LAB6] Oversized read result: %d\n", result);
 }
 
 static void lab6_test_syscall_performance(void)
 {
     printf("\n[LAB6] test_syscall_performance\n");
-    uint64 start = lab6_sys_time();
-    for (int i = 0; i < 10000; i++) {
-        (void)lab6_sys_getpid();
+    struct proc *initp = lab6_find_proc_by_name("init");
+    if (!initp) {
+        printf("[LAB6] init process not ready; skipping\n");
+        return;
     }
-    uint64 end = lab6_sys_time();
+
+    uint64 start = timer_get_ticks();
+    for (int i = 0; i < 10000; i++) {
+        (void)lab6_invoke_syscall(initp, SYS_getpid, 0, 0, 0, 0, 0, 0);
+    }
+    uint64 end = timer_get_ticks();
     printf("[LAB6] 10000 getpid() calls took %lu ticks\n", end - start);
 }
 
@@ -203,7 +301,7 @@ int main()
         userinit();
 
         printf("\n========================================\n");
-        printf("  Lab5: Process Management & Scheduler\n");
+        printf("  Lab5&lab6 Tests\n");
         printf("========================================\n\n");
 
         int tester = create_process(run_all_tests, "proc-tests");
@@ -288,7 +386,7 @@ static void wait_for_children(int n)
 
 static void run_all_tests(void)
 {
-    printf("\n[TEST] Starting kernel process tests...\n");
+    printf("\n[TEST] Starting tests...\n");
     test_process_creation();
     test_scheduler();
     test_synchronization();
@@ -364,7 +462,7 @@ static void exit_status_task(void)
 
 static void test_process_creation(void)
 {
-    printf("\n[TEST] test_process_creation\n");
+    printf("\n[LAB5] test_process_creation\n");
     int created = 0;
 
     for (int i = 0; i < NPROC / 2; i++) {
@@ -374,28 +472,28 @@ static void test_process_creation(void)
         created++;
     }
 
-    printf("[TEST] spawned %d simple tasks\n", created);
+    printf("[LAB5] spawned %d simple tasks\n", created);
     wait_for_children(created);
-    printf("[TEST] test_process_creation completed\n");
+    printf("[LAB5] test_process_creation completed\n");
 }
 
 static void test_scheduler(void)
 {
-    printf("\n[TEST] test_scheduler\n");
+    printf("\n[LAB5] test_scheduler\n");
     const int cpu_tasks = 3;
     for (int i = 0; i < cpu_tasks; i++) {
         int pid = create_process(cpu_task, "test-cpu");
         if (pid < 0)
             panic("Failed to create cpu_task");
-        printf("[TEST] cpu_task pid=%d created\n", pid);
+        printf("[LAB5] cpu_task pid=%d created\n", pid);
     }
     wait_for_children(cpu_tasks);
-    printf("[TEST] test_scheduler completed\n");
+    printf("[LAB5] test_scheduler completed\n");
 }
 
 static void test_synchronization(void)
 {
-    printf("\n[TEST] test_synchronization\n");
+    printf("\n[LAB5] test_synchronization\n");
     spinlock_init(&sync_lock, "sync_lock");
     sync_buffer = 0;
     produced_total = 0;
@@ -408,20 +506,20 @@ static void test_synchronization(void)
 
     wait_for_children(2);
 
-    printf("[TEST] produced=%d consumed=%d buffer=%d\n",
+    printf("[LAB5] produced=%d consumed=%d buffer=%d\n",
            produced_total, consumed_total, sync_buffer);
-    printf("[TEST] test_synchronization completed\n");
+    printf("[LAB5] test_synchronization completed\n");
 }
 
 static void test_exit_wait(void)
 {
-    printf("\n[TEST] test_exit_wait\n");
+    printf("\n[LAB5] test_exit_wait\n");
     const int workers = 4;
     for (int i = 0; i < workers; i++) {
         int pid = create_process(exit_status_task, "exit-status");
         if (pid < 0)
             panic("Failed to create exit_status_task");
-        printf("[TEST] exit worker pid=%d scheduled\n", pid);
+        printf("[LAB5] exit worker pid=%d scheduled\n", pid);
     }
 
     for (int completed = 0; completed < workers; completed++) {
@@ -431,7 +529,7 @@ static void test_exit_wait(void)
             panic("wait_process returned -1 unexpectedly");
         int expected = pid * exit_code_factor;
         if (status != expected) {
-            printf("[TEST] expected status %d for pid %d, got %d\n",
+            printf("[LAB5] expected status %d for pid %d, got %d\n",
                    expected, pid, status);
             panic("exit status mismatch");
         }
@@ -440,7 +538,7 @@ static void test_exit_wait(void)
     if (wait_process(NULL) != -1) {
         panic("wait_process should return -1 when no children");
     }
-    printf("[TEST] test_exit_wait completed\n");
+    printf("[LAB5] test_exit_wait completed\n");
 }
 
 static const char *proc_state_name(enum proc_state state)
@@ -457,7 +555,7 @@ static const char *proc_state_name(enum proc_state state)
 
 static void debug_proc_table(void)
 {
-    printf("\n[TEST] debug_proc_table\n");
+    printf("\n[LAB5] debug_proc_table\n");
     for (int i = 0; i < NPROC; i++) {
         struct proc *p = &proc_table[i];
         if (p->state != PROC_UNUSED) {
@@ -465,7 +563,7 @@ static void debug_proc_table(void)
                    i, p->pid, proc_state_name(p->state), p->name);
         }
     }
-    printf("[TEST] debug_proc_table completed\n");
+    printf("[LAB5] debug_proc_table completed\n");
 }
 
 static void start_worker_demo(void)

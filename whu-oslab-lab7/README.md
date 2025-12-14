@@ -1,10 +1,10 @@
 # Lab7：文件系统
 
-本仓库用于展示 Lab7（文件系统）阶段的成果：基于 RISC-V 内核实现磁盘块管理、inode/目录操作、写前日志、mkfs 工具与内核自测。以下内容仅与 Lab7 相关。
+本仓库用于展示 Lab7（文件系统）阶段的成果：基于 RISC-V 内核实现磁盘块管理、inode/目录操作、写前日志、mkfs 工具与内核自测。
 
 ---
 
-## 1. 环境准备
+## 1. 环境
 
 - Ubuntu 或 WSL2
 - RISC-V 交叉工具链：`riscv64-linux-gnu-gcc`/`ld`
@@ -39,7 +39,6 @@ qemu-system-riscv64 --version
    ```bash
    make qemu         # 自动串行运行 Lab7 自测
    ```
-
    过程中会看到 `[LAB7] test_filesystem_integrity/concurrent_access/performance`、`debug_*` 等输出，可据此确认状态。
 
 4. **调试与清理**
@@ -59,7 +58,7 @@ qemu-system-riscv64 --version
 
 ---
 
-## 4. 自测流程
+## 4. 测试流程
 
 `kernel/boot/main.c` 在内核启动完毕后自动执行以下测试：
 
@@ -87,30 +86,10 @@ qemu-system-riscv64 --version
 ```
 
 ---
-
-## 6. 常见问题
-
-1. **`virtio_disk_init` 报设备不支持**  
-   确认 QEMU 含 `-global virtio-mmio.force-legacy=false`。仓库 `Makefile` 已添加，手动启动时别遗漏。
-
-2. **`panic: ilock: no type`**  
-   说明 `fs.img` 未初始化根目录；重新运行 `python3 tools/mkfs.py fs.img 8`。
-
-3. **`bget: no buffers`**  
-   并发测试 pin 住了全部缓存块。可调小 `LAB7_CONCURRENT_*` 或增大 `kernel/fs/bio.c` 中 `NBUF`。
-
-4. **日志刷屏**  
-   写日志时会显示 `[virtio] submit block ...`，属于正常现象，可通过将 `printf` 封装为 `DEBUG_VIRTIO` 宏后再关闭。
-
-5. **镜像被占用**  
-   若上次 `make qemu` 未正常退出，执行 `pkill -f qemu-system-riscv64` 后重启。
-
----
-
-## 7. 后续工作
+## 6. 后续工作
 
 - 增加更大的块缓存与 `sleep/wakeup` 机制，减少在 `begin_op` 和 `balloc` 中的忙等。
 - 扩展 inode 地址字段（双重间接块或 extent）以支持更大的文件。
 - 引入自动化脚本，对镜像进行崩溃恢复回归测试。
 
-更多细节请参考 `Report.md`。***
+*** 更多细节请参考 `Report.md` ***

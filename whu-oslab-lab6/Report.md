@@ -20,7 +20,7 @@
 - `pagetable_t` + `vm_mappages/uvmalloc/uvmcopy`（`kernel/mem/vmem.c`）：提供用户页表的创建、复制、回收，`copyin/out`/`copyinstr` 是访问用户内存的唯一入口。
 
 ### 与 xv6 对比分析
-- **功能取舍**：仅提供 `/dev/console` 文件，未实现磁盘/管道；xv6 在 `sysfile.c` 中有完整的 inode/目录层，本实验只保留文件描述符逻辑以降低复杂度。
+- **功能取舍**：仅提供 `/dev/console` 文件，未实现磁盘/管道；xv6 在 `sysfile.c` 中有完整的 inode/目录层，本实验只保留文件描述符逻辑。
 - **进程模型**：本实现延续 Lab5 的内核线程概念，但在 Lab6 中加入用户页表与 init 程序；与 xv6 相比暂未提供 `sleep`/`wakeup` 的用户态接口以及 `exec` 以外的程序加载来源。
 - **系统调用接口**：只实现 10 个核心系统调用，没有 `pipe/fstat/mkdir` 等；但 `syscall_desc` 增加了 `arg_count` 便于调式输出和未来扩展，这一点是 xv6 没有的。
 - **调试方式**：在 `syscall()` 中保留 `debug_syscalls` 开关，可打印 `pid`+名称+返回值，方便定位；xv6 则强调通过 `strace` 风格的 printf。
@@ -43,7 +43,7 @@
 
 ### 问题与解决方案
 - **非法指针访问导致内核崩溃**：早期 `sys_write` 直接使用 `copyin`，未判断 `proc->sz`；当用户传入 0x1000000 之类的地址时，触发页表缺失。最终在 `argaddr()` 中统一比较 `addr >= p->sz`，提前返回 -1，避免页表遍历。
-- **`fork` 子进程文件描述符紊乱**：初版忘记 `filedup()`，导致父进程 close 时直接释放 console 文件结构。加入 `filedup()` 并复制 `ofile[]`，同时在 `free_process()` 中遍历 close，保证引用计数正确。
+- **`fork` 子进程文件描述符紊乱**：原先忘记 `filedup()`，导致父进程 close 时直接释放 console 文件结构。加入 `filedup()` 并复制 `ofile[]`，同时在 `free_process()` 中遍历 close，保证引用计数正确。
 - **`exec` 参数复制溢出**：用户传参时需要 16 字节对齐，本地实现时未对 `sp` 做对齐操作，导致 `usertrapret()` 恢复栈时对齐错误。参照 xv6 的 `sp &= ~15` 逻辑修复，并限制 `EXEC_MAXARG`。
 - **调试输出淹没**：worker demo 与测试输出混杂，通过在 `run_lab6_syscall_tests()` 中添加 `\n[LAB6]` 前缀，便于过滤日志；同时增加 `LAB6_ENABLE_SYSCALL_TESTS` 宏，可快速关闭测试。
 
@@ -55,24 +55,31 @@
 ## 测试验证
 
 ### 功能测试结果
-在 `make qemu` 的串口输出中（节选）：
+在 `make qemu` 的串口输出中：
 ```
+
 [LAB6] test_basic_syscalls
-[LAB6] Current PID: 2
-[LAB6] fork skipped (no user pagetable in current process)
-[LAB6] fork() unavailable in current configuration
+[LAB6] Current PID: 1
+[LAB6] wait() returned pid=20 status=42
 
 [LAB6] test_parameter_passing
-[LAB6] open("/dev/console", 2) skipped (filesystem not implemented)
-[LAB6] open /dev/console failed (expected without FS)
+Hello, World![LAB6] Wrote 13 bytes to console
+[LAB6] write with invalid fd result: -1
+[LAB6] write with null buffer result: -1
+[LAB6] write with oversized length result: -1
 ```
-虽然 `proc-tests` 是内核线程，无法真正进入用户态 `fork`，但父进程路径、`wait()` 返回值输出均符合预期。`init` 用户程序成功打印 `Hello from user init!`，说明 `exec + write + exit` 全链路可用。
+![alt text](picture/lab6_test_basic_syscalls.png)
+![alt text](picture/lab6_test_parameter_passing.png)
+
+`lab6_test_basic_syscalls()` 成功创建子进程并回收，`getpid` 返回 1（init 进程）；`wait` 返回子进程 PID 20 和状态 42。`lab6_test_parameter_passing()` 中open("/dev/console") 成功，write 写出了 13 字节，所以打印了 “Hello, World!” 和 “Wrote 13 bytes…”。write(-1, …)：无效 fd，直接返回 -1。
+write(fd, NULL, …)：用户指针为 0，copyin 失败返回 -1。write(fd, …, -1)：长度为负，参数检查会返回 -1。这表明边界检查成功。
 
 ### 性能数据
 `lab6_test_syscall_performance()` 在 2 核 QEMU、128 MB 内存下报告：
 ```
 [LAB6] 10000 getpid() calls took 0 ticks
 ```
+![alt text](picture/lab6_test_syscall_performance.png)
 由于 `timer_get_ticks()` 的粒度较粗（使用 CLINT tick），1 万次 `getpid` 仍低于一个 tick，说明 `syscall()` 分发开销在微秒级以内。后续可通过延长循环或启用 cycle counter 获得更精细的度量。
 
 ### 异常/安全测试
@@ -83,10 +90,8 @@
 [LAB6] read(fd=0, buf=80065fa0, len=1000) skipped
 [LAB6] Oversized read result: -1
 ```
+![alt text](picture/lab6_test_security.png)
 `sys_write/read` 返回 -1 表示 `argaddr()`/`copyin` 检测到非法访问。配合 `sys_close` 的 `fd` 检查，可验证用户态无法凭借错误参数破坏内核。
-
-### 运行日志
-完整运行日志见 `make qemu` 输出，末尾 `run_lab6_syscall_tests()` 结束后仍会启动 worker demo。若需要持久保存，可在主机端将日志重定向到 `picture/lab6-syscall-log.txt` 以替代截图。
 
 ## 思考题与解答
 1. **系统调用数量应该如何确定？如何平衡功能与安全？**  

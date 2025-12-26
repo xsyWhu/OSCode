@@ -6,14 +6,13 @@
 - 搭建基于 virtio block 的块设备层与 32 块缓存，确保所有磁盘访问都走 `bread/bwrite`；
 - 实现写前日志(`begin_op/log_write/end_op`) 保证崩溃一致性；
 - 完整落地 inode/目录/路径解析/位图分配，支持直接+间接块；
-- 通过课件提出的完整性、并发、性能、自检等测试，验证实现符合 Lab7 要求。
+- 通过完整性、并发、性能、自检等测试，验证实现符合 Lab7 要求。
 
 ### 2. 完成情况
 - irtio block 驱动 + 块缓存 + I/O 统计；
 - 日志层 commit/recover 流程，支持并发 begin/end；
 - inode/目录/路径/位图函数与 mkfs 工具；
 - `lab7_*` 测试：integrity/concurrent/performance/debug；
-- 未完成项：双重间接块、在线 fsck 仍在 TODO 列表。
 
 ### 3. 开发环境
 - 硬件：x86_64 主机，QEMU virt (2 vCPU, 256 MB)；

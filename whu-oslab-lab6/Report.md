@@ -1,7 +1,5 @@
 # 综合实验报告 Lab6 —— 系统调用
 
-> 本报告围绕 Lab6 的系统调用实现展开，以下内容严格按照《操作系统内核实验报告规范》组织：从实验概述、系统设计、实验过程、测试验证到问题与总结均补充了必要信息，并在不删除既有内容的前提下进行格式化与扩充，便于直接迁移到学校模板。
-
 ---
 
 ## 一、实验概述
@@ -12,11 +10,10 @@
 - 通过指导手册中的基础/参数/安全/性能测试，确保系统调用的正确性、健壮性与边界处理。
 
 ### 完成情况
-- ✅ `user/usys.S` + `trampoline.S` + `usertrap()/syscall()` 闭环打通；
-- ✅ `struct proc`/`pagetable`/`trapframe` 扩展完备，可为每个进程构建独立用户地址空间；
-- ✅ `sys_{fork,exec,wait,read,write,open,close,sbrk,kill,getpid}` 全部实现并经测试验证；
-- ✅ `run_lab6_syscall_tests()` 覆盖功能/参数/安全/性能四类测试；
-- ⚠️ 仍待扩展：尚未实现更丰富的文件系统、`pipe/mmap/fstat` 等系统调用，后续实验将继续完善。
+- `user/usys.S` + `trampoline.S` + `usertrap()/syscall()` 闭环打通；
+- `struct proc`/`pagetable`/`trapframe` 扩展完备，可为每个进程构建独立用户地址空间；
+-`sys_{fork,exec,wait,read,write,open,close,sbrk,kill,getpid}` 全部实现并经测试验证；
+- `run_lab6_syscall_tests()` 覆盖功能/参数/安全/性能四类测试；
 
 ### 开发环境
 - 硬件：x86_64 主机（QEMU virt 2 核 / 128MB RAM）；

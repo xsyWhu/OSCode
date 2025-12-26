@@ -8,11 +8,10 @@
 - 通过指导手册中的基础/参数/安全/性能测试，确保系统调用的正确性、健壮性与边界处理。
 
 ### 完成情况
-- ✅ `user/usys.S` + `trampoline.S` + `usertrap()/syscall()` 闭环打通；
-- ✅ `struct proc`/`pagetable`/`trapframe` 扩展完备，可为每个进程构建独立用户地址空间；
-- ✅ `sys_{fork,exec,wait,read,write,open,close,sbrk,kill,getpid}` 全部实现并经测试验证；
-- ✅ `run_lab6_syscall_tests()` 覆盖功能/参数/安全/性能四类测试；
-- ⚠️ 仍待扩展：尚未实现更丰富的文件系统、`pipe/mmap/fstat` 等系统调用，后续实验将继续完善。
+- `user/usys.S` + `trampoline.S` + `usertrap()/syscall()` 闭环打通；
+- `struct proc`/`pagetable`/`trapframe` 扩展完备，可为每个进程构建独立用户地址空间；
+-`sys_{fork,exec,wait,read,write,open,close,sbrk,kill,getpid}` 全部实现并经测试验证；
+- `run_lab6_syscall_tests()` 覆盖功能/参数/安全/性能四类测试；
 
 ### 开发环境
 - 硬件：x86_64 主机（QEMU virt 2 核 / 128MB RAM）；

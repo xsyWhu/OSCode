@@ -1,25 +1,36 @@
 # 实验报告：Lab1 —— RISC-V 引导与裸机启动
 
-## 一、实验概述
+## 一、实验目的
 
-### 1. 实验目标
-通过参考 xv6 的裸机引导流程，实现 `_entry → start() → UART` 的最小引导链路，掌握 RISC-V 启动阶段的栈初始化、BSS 段清零、串口驱动与多核栈隔离关键机制。
+通过参考 xv6 的启动机制，理解并实现最小操作系统的引导过程，最终在 QEMU 中输出 `"Hello OS"`。  
 
-### 2. 完成情况
-- `entry.S` 完成 per-hart 栈指针设置、BSS 清零与跳转逻辑。
-- `kernel.ld`、`start.c`、`uart.c`、`print.c` 等核心文件补全，并为 printf 系列加锁。
-- QEMU virt 平台多次运行 `make qemu` 均稳定输出 “Hello OS”，无未完成任务。
+具体目标：
+1. 掌握 RISC-V 裸机启动流程。  
+2. 学会编写启动汇编、链接脚本。  
+3. 理解 BSS 段清零、栈初始化的重要性。  
+4. 实现最小串口驱动并输出字符串。  
+5. 熟悉 QEMU + GDB 调试方法。  
 
-### 3. 开发环境
-- 硬件：x86_64 主机（2 核）
-- 操作系统：Ubuntu 24.04 LTS
-- 交叉工具链：riscv64-unknown-elf-gcc 12.2.0
-- 模拟器：QEMU System riscv64 8.2.2
-- 调试器：gdb-multiarch 15.0.50.20240403
+## 二、实验环境
 
-### 4. 实验目录结构
-```
-###  代码组织结构
+  硬件：x86_64 主机  
+  软件：  
+    QEMU (支持 RISC-V virt)  
+    RISC-V GNU 工具链 (`riscv64-unknown-elf-gcc`)  
+    GDB (`gdb-multiarch`)  
+  系统：Ubuntu 24.04  
+
+## 三、系统设计部分
+
+### 1. 架构设计说明
+本实验的目标是基于 RISC-V 架构，完成一个简化的操作系统内核启动过程。系统整体结构参考 xv6，主要模块包括：
+- **boot**：引导代码，负责栈初始化、BSS 段清零、跳转到 C 语言入口。
+- **lib**：基础库，提供 打印输出、自旋锁 等功能实现。
+- **dev**：外设驱动，如 UART 串口输出。
+- **proc**：进程与 CPU 抽象，提供 `mycpu` / `mycpuid`。
+- **kernel.ld**：链接脚本，规定内存布局并导出符号。
+
+### 2. 代码组织结构
 whu-oslab-lab1  
 ├── include  
 │   ├── uart.h  
@@ -35,18 +46,18 @@ whu-oslab-lab1
 ├── kernel  
 │   ├── boot  
 │   │   ├── main.c    
-│   │   ├── start.c   
+│   │   ├── start.c  
 │   │   ├── entry.S  
 │   │   └── Makefile  
 │   ├── dev  
 │   │   ├── uart.c  
 │   │   └── Makefile  
 │   ├── lib  
-│   │   ├── print.c   
-│   │   ├── spinlock.c 
+│   │   ├── print.c  
+│   │   ├── spinlock.c   
 │   │   └── Makefile    
 │   ├── proc  
-│   │   ├── pro.c 
+│   │   ├── pro.c      
 │   │   └── Makefile  
 │   ├── Makefile  
 │   └── kernel.ld  
@@ -56,172 +67,101 @@ whu-oslab-lab1
 ├── common.mk  
 ├── README.md  
 └── Report.md  
-```
 
-## 二、技术设计
+### 3. 关键数据结构
+- `struct cpu`：表示每个硬件线程（hart）的基本状态。
+- `spinlock_t`：自旋锁结构体，包含 `locked` 和 `cpuid`，用于多核间同步。
+- 全局 `panicked`：标记内核是否崩溃，避免多核同时输出干扰。
 
-### 1. 系统架构设计
-整体流程分为“加载 → 汇编引导 → C 初始化 → 驱动输出”四个阶段，模块与 xv6 对应部分一一映射，方便后续扩展。
+### 4. 与 xv6 对比
+- xv6 在 `start.c` 中会为每个核打印 `hartid`；本实验实现中仅让 hart0 打印 `Hello 05`，避免输出乱序。
+- 自旋锁实现与 xv6 相同，均基于 RISC-V 原子指令 `__sync_lock_test_and_set`。
+- 链接脚本更精简，仅包含 `.text`、`.data`、`.bss` 三个主要段。
 
-```
-QEMU loader  →  _entry(entry.S)  →  start()  →  print_init()/puts()
-        │                 │               │               │
-   加载到0x80000000   栈和BSS就绪      主核判定       UART 驱动输出
-```
+### 5. 设计决策理由
+- **只让 hart0 打印**：确保输出一致性，避免多核 UART 打印交错。
+- **BSS 清零**：保证全局变量（如 `panicked`、自旋锁状态）正确初始化。
+- **使用自旋锁保护 printf**：为后续多核并行做准备。
 
-- `boot`：设置 per-hart 栈、清零 BSS，并跳转到 C 入口。
-- `lib`：提供 print、自旋锁、assert，保证串口输出线程安全。
-- `dev`：实现 16550A UART 驱动，统一寄存器访问接口。
-- `proc`：定义 `struct cpu` 与 `mycpuid()`，为多核调度预留接口。
+## 四、实验过程部分
 
-与 xv6 对比：本实验精简了中断、调度和分页，但保留 per-hart 栈与锁语义，后续扩展无需推翻现有设计。
+### 1. 实现步骤记录
+1. **环境搭建**  
+   - 安装 Ubuntu、QEMU、交叉编译工具链（`riscv64-unknown-elf-gcc`）。  
+   - 使用 `git` 初始化仓库并整理目录结构。
+2. **修改 entry.S**  
+   - 添加 BSS 清零循环，确保全局变量初始化。
+3. **编写 kernel.ld**  
+   - 导出 `edata`、`end` 符号供汇编清零使用。
+4. **补全 print.c**  
+   - 定义 `panicked` 全局变量。  
+   - 实现 `panic`、`puts`、`assert`，并参考xv6加入自旋锁保护,在打印的时候添加锁机制保护。
+5. **参考xv6实现 spinlock.c**  
+   - 编写 `acquire/release`，保证多核同步。  
+6. **实现 proc.c / cpu.h**  
+   - 定义 `struct cpu` 和 `mycpuid`，封装 `tp` 寄存器读取。
+7. **修改 start.c**  
+   - 初始化 UART 并调用 `puts("Hello OS")`。
 
-### 2. 关键数据结构
+### 2. 遇到的问题与解决方案
+- **问题 1：找不到交叉编译器 `riscv64-linux-gnu-gcc`**  
+  - 解决：安装 `gcc-riscv64-unknown-elf` 并修改 Makefile。  
+- **问题 2：spinlock.c 中 `cpu` 字段不存在**  
+  - 解决：检查 `struct spinlock` 定义，改为 `cpuid`。  
+- **问题 3：`panic` 声明和实现不一致**  
+  - 解决：统一函数签名为 `void panic(const char *s)`。  
+- **问题 4：多核同时打印导致输出乱序**  
+  - 解决：只允许 hart0 打印，或者使用 spinlock 保护 `printf`等打印输出函数。  
 
-```c
-struct cpu {
-    int id;
-    int started;
-};
-
-typedef struct spinlock {
-    int locked;
-    char *name;
-    int cpuid;
-} spinlock_t;
-
-__attribute__((aligned(16))) uint8 CPU_stack[4096 * NCPU];
-extern int panicked;
-```
-
-- `struct cpu`：通过 `tp` 寄存器获取 hartid，便于锁归属检查。
-- `spinlock_t`：记录锁状态与持有者，panic 时可打印锁名，定位死锁。
-- `CPU_stack` / `panicked`：置于 BSS 段并由 `_entry` 清零，确保所有核状态一致。
-
-### 3. 核心算法与流程
-1. `_entry` 读取 `mhartid`，为每个 hart 分配 4KB 栈，并以 8 字节步长清零 `[edata,end)`。
-2. 跳转到 `start()` 后仅允许 hart0 初始化 UART、打印 “Hello OS”，其余核进入 `wfi`。
-3. `print.c` 的 puts/printf 通过自旋锁保护；`uart_putc_sync` 轮询 LSR，保证裸机串口输出可靠。
-4. 若后续加入中断/调度，只需在 `start()` 中扩展 S 模式切换与 trap 向量，无需重写引导流程。
-
-## 三、实现细节与关键代码
-
-### 1. 关键函数
-
-`entry.S` —— 多核栈与 BSS 清零：
-
-```asm
-la  sp, CPU_stack
-li  a0, 4096
-csrr a1, mhartid
-addi a1, a1, 1
-mul a0, a0, a1
-add sp, sp, a0
-la  a0, edata
-la  a1, end
-1: bge a0, a1, 2f
-   sd  zero, 0(a0)
-   addi a0, a0, 8
-   j   1b
-2: call start
-```
-
-`start.c` —— 仅主核初始化 UART 并输出：
-
-```c
-void start(void) {
-    unsigned long hartid;
-    asm volatile("csrr %0, mhartid" : "=r"(hartid));
-    if (hartid == 0) {
-        print_init();
-        puts("Hello OS");
-    }
-    while (1) asm volatile("wfi");
-}
-```
-
-`print.c` / `uart.c` —— 串口输出与锁保护：
-
-```c
-void puts(const char *s) {
-  if (!s) return;
-  spinlock_acquire(&print_lk);
-  while (*s) uart_putc_sync(*s++);
-  spinlock_release(&print_lk);
-}
-
-void uart_putc_sync(int c) {
-  push_off();
-  while (panicked);
-  while ((ReadReg(LSR) & LSR_TX_IDLE) == 0);
-  WriteReg(THR, c);
-  pop_off();
-}
-```
-
-### 2. 难点突破
-- **工具链缺失**：默认使用 `riscv64-linux-gnu-gcc`，改为安装 `gcc-riscv64-unknown-elf` 并统一前缀。
-- **汇编扩展名**：`entry.s` 不经过预处理导致符号缺失，更名为 `.S` 并在 `kernel.ld` 导出 `edata/end`。
-- **字符串 relocation 溢出**：`"Hello OS"` 距离 PC 过远，调整链接脚本让 `.rodata` 紧挨 `.text`。
-- **多核串口乱序**：移除 `hartid==0` 后字符交织，通过自旋锁保护并限制主核输出，恢复稳定性。
-
-### 3. 源码理解与思考题
-#### 1. 源码理解总结
+### 3. 源码理解总结
 - **启动流程**：QEMU 加载 kernel → `_entry` 设置栈 → 清零 BSS → `start()` → 初始化 UART → `puts("Hello 05")`。
 - **内核模块划分**：boot 负责硬件初始化，lib 负责基本功能，proc 提供 CPU 抽象。
 
-#### 2. 思考题解答
-- **启动栈**：按 4KB 估算普通函数深度，可在栈底放置魔数检测溢出。
-- **BSS 清零**：若省略，`panicked`、`print_lk` 等全局变量将含随机值；只有引导固件保证清零时才可跳过。
-- **与 xv6 对比**：缺少中断、分页与调度，但依旧保留 per-hart 栈、自旋锁和 panic 逻辑，有利于扩展。
-- **错误处理**：UART 失败无法返回，只能死循环并通过 LED/蜂鸣器输出错误码，保证最小可观测性。
+### 4. 调试流程
+  1. 打开一个终端，执行make qemu-gdb；
+  2. 打开另外一个终端，执行 riscv64-unknown-elf-gdb kernel.elf 或者 gdb-multiarch kernel.elf（多终端）；
+  3. 连接到QEMU —— target remote :1234
+  4. 设置断点、运行等：
+  b _start
+  b main    
+  c
+  si //单步执行
+  info registers //查看寄存器
+  x/16x 0x80000000 //查看内存
 
-## 四、测试与验证
+## 五、测试验证部分
 
-### 1. 功能测试
-**基本启动**
-```bash
-$ make qemu
-Hello OS
-```
-![alt text](<picture/2CPU Test.png>)
-![alt text](picture/test.png)
-实际输出与预期一致，串口没有出现乱码。
+### 1. 功能测试结果
+运行：vscode终端里面：输入make qemu
+输出![alt text](./picture/test.png)
 
-**多核验证**  
-移除 `hartid==0` 判断，每个核都会输出 “Hello OS”，次数与 `-smp` 参数一致，验证 per-hart 栈正常工作。
+### 2. 异常测试部分
+- 1. 我发现将entry.S 中的bss段清零去掉似乎也是正常输出，并未出现乱码情况——询问AI得知这是因为QEMU 的 ELF loader 自动帮我清零了 .bss 段。但从 OS 启动的正确性 来说，清零 .bss 还是必须的，否则一旦换加载方式（裸 bin / 真机）就会立即出问题。
+- 2. 如果在start.c中去除if(hartid == 0) 判定,会重复输出Hello OS,这是取决于核的数目。另外，因为在打印中我们添加了锁保护机制，所以输出的字符并不混乱。运行结果图如下：
+![alt text](./picture/QQ_1758960389260.png)
 
-### 2. 边界与异常测试
-- **BSS 清零实验**：注释清零循环后，`panicked` 有时为 1，串口停止输出，证明清零步骤必要。
-- **UART 忙等待**：在 `uart_putc_sync` 中临时增加延迟，确认锁不会被打断，输出仍保持顺序。
-- **panic 场景**：手动调用 `panic("test")`，串口输出 `panic: test` 并进入死循环，异常路径可用。
+## 六、实验总结
+  通过本实验，我掌握了 RISC-V 裸机启动流程，学会了如何从 _start 设置栈、清零 BSS，再跳转到 C 函数，并通过串口打印输出验证结果。使用 QEMU + GDB，可以精确调试每一步。最终成功实现最小 OS 输出 "Hello 05"。其中遇到了一些小问题，比如我没注意到entry.S文件名后缀应该是大写的'S'，而非小写，导致在make run 中一直报错——最后通过多次询问ChatGpt解决问题。另外，编译过程中还遇到“编译器在生成对字符串常量 "Hello 05\n" 的访问时，尝试用 RISC-V 的 auipc+addi 模式，结果因为地址太远而失败”这类错误，因为是在裸机中，我们把程序加载在0x80000000，而默认编译选项假设 .rodata 可能在更远的地方。故而我在链接脚本中将.rodata 紧跟 .text，地址更近，也避免 relocation 溢出。
+  除此之外，在进行调试的时候也出现了一些问题如“(gdb) c The program is not being run.”，最后发现是由于输入“target remote :1234”未连接成功,后面也是将报错信息提供给AI，逐步排查发现
+是输入指令格式问题（多了一个换行符）。
 
-### 3. 调试与截图
-- 调试流程：`make qemu-gdb` + `gdb-multiarch kernel.elf`，`target remote :1234` 后可单步跟踪 `_entry`。
-- 截图：`picture/test.png` 展示基本输出；`picture/QQ_1758960389260.png` 展示移除 hart 限制后的多次打印。
+## 七、思考题解答
+1. 启动栈的设计：
+o 你如何确定栈的大小？考虑哪些因素？
+o 如果栈溢出会发生什么？如何检测栈溢出？
+- 答：考虑到函数调用深度，我采用4kb大小的栈。若溢出，可能会造成程序崩溃，可在栈底添加一个魔数。main() 死循环里轮询，若改变则 panic("stack overflow")。
 
-## 五、问题与总结
+2. BSS 段清零：
+o 写一个全局变量，不清零 BSS 会有什么现象？
+o 哪些情况下可以省略 BSS 清零？
+- 答：BSS段如果不清零，全局变量的值是随机的，除非每一个全局变量均进行了初始化或者ROM引导加载器全部初始化为0（如OpenSBI）。
 
-### 1. 遇到的问题
+3. 与 xv6 的对比：
+o 你的实现比 xv6 简化了哪些部分？
+o 这些简化在什么情况下会成为问题？
+- 答：与xv6其支持多核，中断以及内存管理等，但是在lab1中支持单核/双核，串口输出。一旦加入中断/异常/系统调用，必须补页表、栈隔离、锁，否则串口输出乱码、寄存器被覆盖。想跑用户程序时需加 sstatus.SPP 切换、页表隔离，否则用户指针直接读写内核。想支持多核时，单栈模型会瞬间崩溃，必须像 xv6 那样 per-hart stack。
 
-1. **entry.s 无法解析符号**  
-   - 现象：链接时报 `undefined reference to edata`。  
-   - 原因：`.s` 文件缺少 C 预处理阶段。  
-   - 解决：改为 `entry.S` 并在 linker script 中导出符号。  
-   - 预防：约定所有需要包含头文件的汇编文件均使用 `.S`。
-
-2. **字符串 relocation 溢出**  
-   - 现象：编译器提示 `relocation truncated to fit`。  
-   - 原因：字符串常量距离 PC 超过 4KB。  
-   - 解决：将 `.rodata` 紧跟 `.text`，让常量处于可寻址范围。  
-   - 预防：保持段布局紧凑，必要时拆分文本。
-
-### 2. 实验收获
-- 掌握 RISC-V 裸机引导链路、链接脚本与 BSS 管理。
-- 理解 16550A UART 配置及多核串口同步方式。
-- 熟悉 QEMU + gdb-multiarch 联合调试，能逐条验证指令执行。
-
-### 3. 改进方向
-- 增加 LED/蜂鸣器等最小错误指示，提升裸机可观测性。
-- 在 `print.c` 中实现 `printf`/格式化输出并补充单元测试。
-- 预留 trap 向量与分页框架，为后续实验快速扩展调度与内存管理。
+4. 错误处理：
+o 如果 UART 初始化失败，系统应该如何处理？
+o 如何设计一个最小的错误显示机制？
+- 答：裸机无返回地址，不能 return -1；只能 原地死循环 + 闪灯/蜂鸣。因为UART初始化失败了，那么不能够再依赖于UART，此时可以依据一个led灯，通过其闪烁状态去识别错误

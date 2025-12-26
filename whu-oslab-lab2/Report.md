@@ -1,21 +1,37 @@
+# Lab2 —— 内核 printf 与 ANSI 控制台
 
-# 实验报告：Lab2 —— 添加内核 printf 与清屏功能实现
+## 一、实验概述
 
-## 一、实验目的
+### 实验目标
+在 Lab1 最小引导环境的基础上实现“可用的内核 printf 子系统”。包含：  
+1. 设计与实现支持 `%d/%x/%p/%s/%c/%%` 的内核 `printf`；  
+2. 提供清屏、定位、前景/背景颜色设置等 ANSI 控制能力；  
+3. 构建线程安全的输出路径，保证多核串口不会交错。
 
+### 实验目的
 1. 理解操作系统内核为什么必须自己实现基本的输出功能（如 `printf` 和清屏）。  
 2. 掌握内核中 `printf` 的设计方法，包括格式解析、数字转换和字符串输出。  
 3. 了解 BSS 段清零的重要性，以及启动阶段的最小输出环境搭建。  
 4. 通过实现清屏与定位功能，熟悉 ANSI 转义序列或显存写入机制。  
 5. 完成综合测试与优化，思考性能瓶颈和改进方向。
 
-## 二、实验环境及框架
+### 完成情况
+- `print.c` 重新实现 `printf/puts`，可安全输出字符串、整数、指针、字符等多种格式。  
+- 新增 console 抽象与 ANSI 工具函数 `clear_screen/goto_xy/set_color/reset_color`，并复用 PPT 第四节中的控制序列建议。  
+- `start.c` 演示脚本完成清屏、颜色切换、光标跳转与边界测试，串口输出截图记录在 `picture/*.png`。  
+- 自旋锁、BSS 清零、per-hart 栈等基础设施全部继承并通过测试。
 
-### 1. 实验环境
-- 开发平台：Ubuntu 24.04 + RISC-V 工具链 (`riscv64-linux-gnu-gcc`)  
-- 模拟器：QEMU (`qemu-system-riscv64 -machine virt -nographic`)  
+### 开发环境
+- 硬件：x86_64 主机（2×CPU ）  
+- 操作系统：Ubuntu 24.04 LTS  
+- 交叉工具链：`riscv64-unknown-elf-gcc 12.2.0`  
+- 模拟器：`qemu-system-riscv64 8.2.2`（`-machine virt -nographic`）  
+- 调试器：`gdb-multiarch 15.0.50.20240403`
 
-### 2. 代码框架
+## 二、技术设计
+
+### 目录结构
+```
 whu-oslab-lab2  
 ├── include  
 │   ├── uart.h  
@@ -52,73 +68,161 @@ whu-oslab-lab2
 ├── common.mk  
 ├── README.md  
 └── Report.md  
-## 三、实验内容与实现
+```
 
-### 1. 内核最小输出环境
+### 系统架构
+整体输出路径增加了 console 层，便于在 UART 与未来的 VGA/缓冲设备之间切换：
 
-- UART 驱动：实现 `uart_putc_sync`，保证字符能稳定发送到串口。  
-- BSS 清零：在启动汇编 `entry.S` 中，使用链接脚本导出的 `edata/end` 清空全局变量区。  
-- 多核栈设置：每个 hart 分配独立的 4 KiB 栈，避免并发冲突。
+```
+start.c demo
+     │
+ lib/print.c —— printf/puts/panic
+     │   (spinlock 保护)
+ dev/console.c —— clear_screen/goto_xy/set_color
+     │
+ dev/uart.c —— 16550A 同步发送
+```
 
-### 2. `printf` 的实现
+与 xv6 相比：  
+- 删除了 xv6 中较重的中断/TTY 逻辑，只保留轮询串口；  
+- printf 仍借助空闲链表式 `spinlock`，保持接口一致；  
+- 根据 PPT 内容加入 ANSI 控制序列，代替 xv6 通过显存清屏的方式，更适合 `-nographic` 的 QEMU。
 
-- **支持的格式**：`%d`、`%x`/`%p`、`%s`、`%c`、`%%`。  
-- **数字转换**：非递归除法取余，避免栈过深，同时支持负数和 `INT_MIN`。  
-- **字符串输出**：空指针自动转为 `"(null)"`。  
-- **并发安全**：通过自旋锁 `spinlock` 保护，保证多核同时输出不交错。  
+### 关键数据结构
+```c
+typedef struct spinlock {
+    int locked;
+    char *name;
+    int cpuid;
+} spinlock_t;
 
-### 3. 清屏与控制
+__attribute__((aligned(16))) uint8 CPU_stack[4096 * NCPU];
+extern int panicked;
+```
+- `spinlock_t`：沿用 Lab1 的自旋锁，新增 `console_putc()` 时仍统一由 `print_lk` 保护，保证多核输出顺序。  
+- `CPU_stack` / `panicked`：位于 BSS，由 `entry.S` 清零，确保 printf 不受脏数据干扰。  
+- `console`：虽然结构简单，但在接口上与 PPT 中“console 抽象”一致，后续可以替换为 VGA 或环形缓冲。
 
-基于 ANSI 转义序列实现：
+### 核心流程
+1. `_entry`：设置 per-hart 栈 & 清零 `[edata,end)`；  
+2. `start()`：仅 hart0 执行 `print_init()`，其余 hart 在 `wfi` 等候；  
+3. `print_init()`：初始化 console (间接初始化 UART) 并初始化自旋锁；  
+4. `printf()`：解析格式串 → 逐一从 `va_list` 取参数 → 调用 `print_number`/`print_putc`；  
+5. ANSI 功能：根据 PPT 第四节的 ESC 序列，组合 `\x1b[2J\x1b[H`（清屏）、`\x1b[row;colH`（定位）、`\x1b[3xm`/`\x1b[4xm`（颜色）。
 
-- `clear_screen()` → `ESC[2J ESC[H` 清屏并复位光标。  
-- `goto_xy(row,col)` → `ESC[row;colH` 定位光标。  
-- `set_color(fg,bg)` / `reset_color()` → 修改前景/背景色。  
+## 三、实现细节与关键代码
 
-### 4. 综合测试
+### 1. printf 核心代码
+```c
+void printf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    spinlock_acquire(&print_lk);
+    for (const char *p = fmt; p && *p; ) {
+        if (*p != '%') { print_putc(*p++); continue; }
+        switch (*++p) {
+        case 's': { char *s = va_arg(ap, char*); if (!s) s = "(null)"; while (*s) print_putc(*s++); break; }
+        case 'd': { long v = va_arg(ap, int); print_number((unsigned long)v, 10, 1); break; }
+        case 'x': { unsigned int x = va_arg(ap, unsigned int); print_number(x, 16, 0); break; }
+        case 'p': { unsigned long x = va_arg(ap, unsigned long); print_number(x, 16, 0); break; }
+        case 'c': { print_putc((char)va_arg(ap, int)); break; }
+        case '%': print_putc('%'); break;
+        default:  print_putc('%'); if (*p) print_putc(*p); break;
+        }
+        if (*p) p++;
+    }
+    spinlock_release(&print_lk);
+    va_end(ap);
+}
+```
+- `print_number()` 采用迭代除法与本地缓冲；带符号路径直接在 64 位寄存器里完成，不会触发 `INT_MIN` 溢出。  
+- Panic 场景绕过锁，直接 UART 输出，避免死锁。
 
-在 `start.c` 的主核中演示：
+### 2. ANSI 控制函数
+```c
+void clear_screen(void)  { print_puts("\x1b[2J\x1b[H"); }
+void goto_xy(int row,int col) { /* 构造 ESC[row;colH */ }
+void set_color(int fg,int bg) {
+    char seq[32];
+    /* ESC[3xm 控制前景色, ESC[4xm 控制背景色 */
+}
+```
+- 参照 PPT 第四节“ANSI 控制序列”中的写法实现；  
+- `print_puts` 直接走 UART，同 panic 路径可用于早期输出。
 
-clear_screen(); //清屏
-set_color(2, -1);  // 绿色文字
-printf("=== Kernel printf & ANSI Demo ===\n");
-reset_color(); //重置颜色
-printf("INT_MIN test: %d, INT_MAX: %d\n", (int)0x80000000, (int)0x7fffffff); //测试边界条件
-printf("cpuid=%d, hex=0x%x, str=%s, char=%c\n", mycpuid(), 0xabc, "Hello", 'X');
-goto_xy(6, 10); //光标移动
-printf("Here at (6,10)\n");
+### 3. 演示脚本
+`start.c` 的 hart0 流程：
+```c
+clear_screen();
+set_color(2, -1);
+printf("=== OS Lab: Kernel printf & ANSI Demo ===\n");
+reset_color();
+printf("cpuid=%d, hex=0x%x, char=%c, str=%s, percent=%%\n", mycpuid(), 0xABC, 'X', "Hello");
+printf("INT_MIN test: %d, INT_MAX: %d\n", (int)0x80000000, (int)0x7fffffff);
+goto_xy(6, 10); printf("Here at (6,10)\n");
+for (int i=3;i>0;i--) printf("%d ", i);
+clear_screen(); printf("Screen cleared.\n");
+```
+- 既演示颜色/定位，也检验 `%d/%x/%s/%c/%p/%` 等路径。
 
-### 5. 测试结果
+### 4. 难点突破
+1. **INT_MIN 溢出**：`print_number` 直接对 `int` 取负会溢出。解决：先提升为 `long`，再转为 `unsigned long`。  
+2. **ANSI 序列无效**：最初忘记写 `ESC[H` 导致清屏后光标停在原位置，参考 PPT 第四节方案改为 `\x1b[2J\x1b[H`。  
+3. **光标跳转覆盖输出**：`goto_xy` 默认 1-based，误传 0 导致覆盖。加入参数校验并把 demo 坐标调至 `(6,10)`。  
+4. **多核输出乱序**：早期在 `printf` 内部未加锁，hart1 会穿插 hart0 文本。复用 Lab1 的 `spinlock` 后问题消失。
 
-输入make qemu后成功显示出清屏的功能：![alt text](./picture/QQ_1758965601330.png)
-向上滑动查看终端历史输出记录：![alt text](./picture/QQ_1758965709655.png)
-我们可以清楚地看到字体颜色发生了改变，输出了一段绿色的字符串。另外，边界测试结果也成功输出。
+### 5. 思考题 & 源码理解
+- **为什么内核要自建 printf？** 启动期没有 libc 与系统调用，只有直接驱动串口的自研 `printf` 才能提供调试出口。  
+- **为何要清屏/定位？** 便于在 `-nographic` 控制台快速区分新旧输出，也是 PPT 第四节建议的“最小用户界面”。  
+- **为什么采用 console 抽象？** 当前只有 UART，但抽象层可屏蔽底层差异，未来接入 VGA/日志缓冲不需改 printf。
 
-## 四、测试与优化
+## 四、测试与验证
 
 ### 功能测试
-- 单字符、整数字符串、特殊符号 `%`。  
-- 边界条件：`INT_MIN`、`NULL` 字符串。  
+1. **基本启动**  
+   ```
+   $ make qemu
+   Hello OS
+   === OS Lab: Kernel printf & ANSI Demo ===
+   ...
+   ```
+   颜色、定位、清屏依次生效，串口输出与预期相符。  
+2. **格式化覆盖**：打印 `%d/%x/%p/%s/%c/%%`，并分别测试 0、负数、`INT_MIN`、长指针、NULL 字符串。  
+3. **并发验证**：临时去掉 `hartid==0` 判断，两核同时 printf，仍因锁保护而无字符交织。
 
-### 性能测试
-- 大量循环输出字符串，检查是否死锁、是否丢字符。  
+### 边界 / 异常测试
+- **INT_MIN**：`printf("INT_MIN: %d\n", 0x80000000)` → 输出 `-2147483648`。  
+- **NULL 字符串**：`printf("%s\n", (char*)0)` → 输出 `(null)`。  
+- **未知格式**：`printf("%q\n", 1)` → 以 `"%q"` 原样输出，保证内核不 panic。  
+- **ANSI 回退**：向 `set_color` 传入负数时自动回退到默认 7/0。
 
-### 优化思路
-- **批量输出**：把字符串先缓存在临时数组中，一次性写 UART FIFO。  
-- **查表优化**：十六进制转换可用预定义查表。  
-- **格式解析优化**：简单场景下可用有限状态机代替复杂 switch。
+### 截图 & 日志
+- `picture/clean.png`：`clear_screen()` 后重新绘制的终端。  
+- `picture/moveCursor&color.png`：绿色标题 + `(6,10)` 输出，验证 PPT 第四节示例。  
+- `picture/printfTest.png`：展示格式化结果与倒计时清屏过程。
+输入make qemu后成功显示出清屏的功能：![alt text](./picture/clean.png)
+向上滑动查看终端历史输出记录：![alt text](./picture/moveCursor&color.png)
+printf 输出结果符合预期：![alt text](picture/printfTest.png)
+我们可以清楚地看到字体颜色发生了改变，输出了一段绿色的字符串。另外，边界测试结果也成功输出。
 
-## 五、调试方法
+## 五、问题与总结
 
-1. **分模块调试**：  
-   - 先测单字符输出  
-   - 再测数字转换  
-   - 再测字符串处理  
-   - 最后综合格式串  
+### 1. 遇到的问题
+1. 数字转换错误（如负数显示为正数）——在原来的print_number中未处理负数情况（直接使用无符号数转换），INT_MIN 转换时溢出（-INT_MIN 仍为负数）后来在 print_number 中先判断符号，转为正数处理；INT_MIN 特殊处理，直接硬编码输出
 
-2. **错误恢复**：  
-   - 遇到未知格式，直接原样输出 `%x`，保证内核不会崩溃。  
-   - UART 初始化失败 → `panic("uart init failed")`。
+2. 清屏或光标定位无效——后来检查发现是转义序列格式错误（如缺少 `[ `或使用错误参数），使用标准转义序列。
+
+3. 光标跳转后覆盖原有输出——在检查输出时，我发现原来的`Moving cursor to (6,10) and printing there...`这段输出被后面的输出覆盖。仔细排查后发现这是由于光标移动的位置刚好在那个字符串输出的位置上，将其移动位置改为（6，10）就避免了覆盖。
+
+### 2. 实验收获
+- 深入理解了“启动期自研 printf + console 抽象”的设计意义；  
+- 掌握 ANSI 控制序列的常见写法，可快速在终端中呈现友好的 UI；  
+- 熟悉了在裸机环境下调试格式化输出、定位边界问题的方法。
+
+### 3. 改进方向
+1. **缓冲与中断驱动**：后续可将 console 切换为环形缓冲 + 中断发送，降低忙等开销。  
+2. **可扩展格式化**：支持最小宽度、填充、无符号十进制 `%u` 等。  
+3. **日志子系统**：引入日志级别、时间戳、串口/内存双写，方便排障。
 
 ## 六、思考题回答
 
@@ -144,23 +248,3 @@ printf遇到空指针的时候我在代码里先判断，后面直接输出字�
 `   s = "(null)";`
 ` while (*s) //否则，逐字符输出字符串`
 `   print_putc(*s++);`
-
-## 七、出现的问题及解决思路
-
-1. 数字转换错误（如负数显示为正数）——在原来的print_number中未处理负数情况（直接使用无符号数转换），INT_MIN 转换时溢出（-INT_MIN 仍为负数）后来在 print_number 中先判断符号，转为正数处理；INT_MIN 特殊处理，直接硬编码输出
-
-2. 清屏或光标定位无效——后来检查发现是转义序列格式错误（如缺少 `[ `或使用错误参数），使用标准转义序列。
-
-3. 光标跳转后覆盖原有输出——在检查输出时，我发现原来的`Moving cursor to (6,10) and printing there...`这段输出被后面的输出覆盖。仔细排查后发现这是由于光标移动的位置刚好在那个字符串输出的位置上，将其移动位置改为（6，10）就避免了覆盖。
-![alt text](./picture/QQ_1758965458515.png)
-
-## 八、实验总结
-
-通过本章实验，我掌握了以下要点：
-
-- 如何在内核早期搭建最小输出环境；  
-- 如何用 C 实现一个轻量级 `printf`；  
-- 为什么 BSS 清零、锁保护、ANSI 转义序列在实验中很重要；  
-- 在实现过程中，逐步调试、分层设计是保证正确性的关键。  
-
-本实验为我后续进程调度和系统调用实验提供了必要的调试工具，也加深了我对内核开发中输出系统设计的理解。

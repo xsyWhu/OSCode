@@ -4,6 +4,27 @@
 
 ---
 
+## 一、实验概述
+
+### 实验目标
+在 Lab3 运行态基础上，补齐“中断—trap—驱动”全栈链路，使得 RISC-V 平台可以正确处理 M/S 模式下的时钟和外设中断、输出调试日志，并为后续调度/系统调用提供定时器与异常框架。
+
+### 完成情况
+- 配置 `medeleg/mideleg`、`mie/sie`、PLIC 阈值等寄存器，实现 Machine→Supervisor trap 委托；
+- 实现 `kernel_vector`/`timer_vector` 与 `trap_kernel_handler()`，可区分时钟、外设与异常；
+- 搭建 IRQ 注册与 enable/disable API，UART 中断与回显工作正常；
+- 新增 `timer_update()`/`timer_get_ticks()`，通过多项测试验证精度与性能；
+- 可进一步补充的方向：将 `timer_interrupt_handler()` 中的调度钩子替换为真正的进程调度逻辑，并扩展更多 PLIC 设备。
+
+### 开发环境
+- 硬件：x86_64 主机（QEMU virt）
+- 操作系统：Ubuntu 24.04 LTS
+- 工具链：`riscv64-unknown-elf-gcc 12.2.0`、`gdb-multiarch 15.0.50.20240403`
+- 模拟器：`qemu-system-riscv64 8.2.2 -machine virt -nographic`
+- 调试方式：`make qemu-gdb` + `gdb-multiarch kernel.elf`
+
+---
+
 ## 系统设计部分
 
 ### 架构设计说明
@@ -66,6 +87,18 @@
    3. 在 `external_interrupt_handler()` 临时打印 `plic_claim()` 的返回值，确认是否有 pending IRQ；
    4. 如果 Claim 返回 0，说明设备未发中断或者 PLIC/enable 位没设置；检查 UART 的 IER 寄存器（驱动里有使能 RX interrupt 的写操作），以及 PLIC 的优先级/阈值设置；
    5. 避免在中断处理里做大量 `printf`：`printf` 可能会争用锁或触发再次中断，导致时序问题。确认后再把调试打印删掉。
+
+### 实验收获
+- 深入理解了 M/S 模式 trap 委托与 PLIC/CLINT 的协作，能够独立完成寄存器配置、trap 调试与日志分析；
+- 掌握了“IRQ 注册表 + enable/disable API” 的驱动扩展模式，后续新增设备只需注册 handler 即可复用；
+- 形成了 `make qemu-gdb` + 串口日志的调试套路，遇到“无中断/无回显”问题能按步骤排查；
+- 通过 `timer_update()`/`timer_get_ticks()` 的设计，体会到多核环境下控制共享状态与锁粒度的重要性。
+
+### 改进方向
+- 将 `timer_interrupt_handler()` 中的占位 `yield()` 替换为真正的调度逻辑，实现周期性抢占；
+- 扩展 `irq_table` 支持优先级与嵌套控制，并结合 PLIC 硬件优先级处理更多外设；
+- 在中断上下文减少 `printf`，改用环形缓冲或轻量日志接口，降低时延与抖动；
+- 评估 `kernel_vector` 的压栈策略，引入 per-hart ISR 栈或 Lazy Save，进一步优化中断延迟。
 
 ---
 

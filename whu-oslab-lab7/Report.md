@@ -1,6 +1,28 @@
 # 综合实验报告 Lab7：文件系统
 
-本报告聚焦 Lab7 的文件系统实现，围绕系统设计、实现过程、验证手段与思考题展开。
+## 零、实验概述
+
+### 1. 实验目标
+- 搭建基于 virtio block 的块设备层与 32 块缓存，确保所有磁盘访问都走 `bread/bwrite`；
+- 实现写前日志(`begin_op/log_write/end_op`) 保证崩溃一致性；
+- 完整落地 inode/目录/路径解析/位图分配，支持直接+间接块；
+- 通过课件提出的完整性、并发、性能、自检等测试，验证实现符合 Lab7 要求。
+
+### 2. 完成情况
+- irtio block 驱动 + 块缓存 + I/O 统计；
+- 日志层 commit/recover 流程，支持并发 begin/end；
+- inode/目录/路径/位图函数与 mkfs 工具；
+- `lab7_*` 测试：integrity/concurrent/performance/debug；
+- 未完成项：双重间接块、在线 fsck 仍在 TODO 列表。
+
+### 3. 开发环境
+- 硬件：x86_64 主机，QEMU virt (2 vCPU, 256 MB)；
+- 操作系统：Ubuntu 24.04 LTS；
+- 工具链：`riscv64-unknown-elf-gcc 12.2.0`，`gdb-multiarch 15.0.50`；
+- 模拟器：`qemu-system-riscv64 8.2.2 -machine virt -nographic -global virtio-mmio.force-legacy=false`；
+- 构建命令：`make && make qemu`，调试：`make qemu-gdb`。
+
+---
 
 ## 一、系统设计
 
@@ -115,3 +137,28 @@
 
 5. **如何检测并修复文件系统损坏，并在在线状态下执行检查？**  
    离线可通过 `fsck` 风格的扫描：校验超级块、inode 引用计数与位图一致性，并尝试回收孤儿 inode；在线可以周期性执行 scrub 线程，利用日志记录和块校验和比对来检测 silent data corruption，配合冗余或快照实现不停机修复。
+
+---
+
+## 六、问题与总结
+
+### 1. 典型问题
+| 问题 | 现象 | 原因 | 解决 | 预防 |
+| --- | --- | --- | --- | --- |
+| `virtio_disk_rw` 不返回 | QEMU 卡住无日志 | 默认 legacy 模式，驱动写 modern 寄存器 | 在命令行加 `force-legacy=false` 并仅保留 modern 流程 | 每次升级 QEMU 前验证设备模式 |
+| `panic: ilock: no type` | mount 时崩溃 | mkfs 镜像未写根 inode | 重写 `tools/mkfs.py`，创建 `.`/`..` 和位图 | 生成镜像后用 `hexdump` 检查超级块/根目录 |
+| `bget: no buffers` | 并发测试 early panic | `NBUF=32` 不足，所有 buf 被 pin | 降低 `LAB7_CONCURRENT_*` 默认值，提示需要时增大 `NBUF` | 在 README 写明如何调参，后续扩容缓存 |
+| 目录删除后 `nlink` 错乱 | 再次访问目录报错 | 删除目录时未更新父目录链接数 | `lab7_unlink` 调整：dir 空检查 + 更新父 `nlink` | 写目录操作统一走 `dirlink/dirunlink`，保持对称 |
+| 日志溢出 | `panic: log_write: too big` | 多事务嵌套，`outstanding` 超限 | `begin_op()` 在日志空间不足时睡眠，`LAB7` 测试串行执行 | 增加日志容量或约束应用行为 |
+
+### 2. 实验收获
+- 从块层到日志层再到 inode/目录，完整体验了一个简化文件系统的构建路径；
+- 通过 `debug_filesystem_state/usage` 等辅助函数，学会如何快速定位磁盘布局或 inode 泄露问题；
+- 理解写前日志在崩溃恢复中的作用，并通过 `recover_from_log()` 验证幂等性；
+- 学会使用 Python `mkfs.py` 快速生成镜像并在调试时重置环境。
+
+### 3. 改进方向
+- 扩展到双重间接块或 extent 分配，以支持更大的文件；
+- 为目录扫描加入缓存/哈希，降低 `namex()` 的线性成本；
+- 增大块缓存并在 `bget()` 中加入更细粒度 pin/锁，适配更多并发测试；
+- 规划在线 fsck/校验和机制，增强运行时一致性保障。

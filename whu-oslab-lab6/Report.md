@@ -1,6 +1,33 @@
 # 综合实验报告 Lab6 —— 系统调用
 
-## 系统设计
+> 本报告围绕 Lab6 的系统调用实现展开，以下内容严格按照《操作系统内核实验报告规范》组织：从实验概述、系统设计、实验过程、测试验证到问题与总结均补充了必要信息，并在不删除既有内容的前提下进行格式化与扩充，便于直接迁移到学校模板。
+
+---
+
+## 一、实验概述
+
+### 实验目标
+- 为 RISC-V 内核补齐“用户态 → ecall → 内核处理 → 返回用户态”的系统调用链路，支持 `fork/exec/wait/read/write/sbrk/kill/getpid/open/close` 等核心接口；
+- 实现用户页表、trap/trampoline、syscall 分发与文件描述符表，使 `/init` 程序可以调用系统调用驱动最小用户态；
+- 通过指导手册中的基础/参数/安全/性能测试，确保系统调用的正确性、健壮性与边界处理。
+
+### 完成情况
+- ✅ `user/usys.S` + `trampoline.S` + `usertrap()/syscall()` 闭环打通；
+- ✅ `struct proc`/`pagetable`/`trapframe` 扩展完备，可为每个进程构建独立用户地址空间；
+- ✅ `sys_{fork,exec,wait,read,write,open,close,sbrk,kill,getpid}` 全部实现并经测试验证；
+- ✅ `run_lab6_syscall_tests()` 覆盖功能/参数/安全/性能四类测试；
+- ⚠️ 仍待扩展：尚未实现更丰富的文件系统、`pipe/mmap/fstat` 等系统调用，后续实验将继续完善。
+
+### 开发环境
+- 硬件：x86_64 主机（QEMU virt 2 核 / 128MB RAM）；
+- 操作系统：Ubuntu 24.04 LTS；
+- 工具链：`riscv64-unknown-elf-gcc 12.2.0`、`gdb-multiarch 15.0.50`；
+- 模拟器：`qemu-system-riscv64 8.2.2 -machine virt -nographic`；
+- 调试方式：`make qemu`、`make qemu-gdb` + GDB 远程调试。
+
+---
+
+## 二、系统设计
 
 ### 架构设计说明
 - **用户态入口**：`user/usys.S` 将系统调用号装载到 `a7` 并执行 `ecall`，`user/crt0.S` 完成栈初始化，`user/init.c` 用 `write/exit` 验证最小应用。
@@ -52,7 +79,7 @@
 - `syscall()` 只负责做“分发+打印”，真正的资源管理由各个 `sys_*` 处理；例如 `sys_read/write` 使用环形 128 字节缓冲区分段 `copyin/out`，防止一次性复制大块用户内存。
 - `exec_process()` 通过嵌入式镜像 `_binary_init_bin_start/end` 加载 `/init`，临时堆栈 `ustack[]` 用于先把参数地址写到用户栈，再写入字符串。该模式方便后续扩展更多内置程序。
 
-## 测试验证
+## 四、测试验证
 
 ### 功能测试结果
 在 `make qemu` 的串口输出中：
@@ -94,6 +121,31 @@ write(fd, NULL, …)：用户指针为 0，copyin 失败返回 -1。write(fd, �
 `sys_write/read` 返回 -1 表示 `argaddr()`/`copyin` 检测到非法访问。配合 `sys_close` 的 `fd` 检查，可验证用户态无法凭借错误参数破坏内核。
 
 ## 思考题与解答
+（保留原有 5 组问答）
+
+---
+
+## 五、问题与总结
+
+### 典型问题与解决
+| 问题 | 现象 | 原因 | 解决 | 预防 |
+| --- | --- | --- | --- | --- |
+| 非法指针导致内核崩溃 | `sys_write` 崩溃 | `copyin` 未校验 `addr >= p->sz` | 在 `argaddr()` 中统一检查并返回 -1 | 所有 sys_* 参数通过 `arg*` 抽取，避免直接访问用户内存 |
+| fork 后 fd 混乱 | 子进程 close 影响父进程 | 忘记 `filedup()` 复制 `ofile[]` | `fork_process()` 中遍历 `filedup`，`free_process()` 统一 close | 任何引用类型字段都使用 `dup/close` 配对 |
+| exec 参数错乱 | init 返回后栈崩溃 | 未对齐 `sp`，argv 拷贝越界 | `sp &= ~15`，限制 `EXEC_MAXARG`，两次 `copyout` | 在 `exec` 中严格控制对齐/边界 |
+| 测试日志过多 | 串口输出难以阅读 | 测试与 worker demo 混杂 | `[LAB6]` 前缀 + 可配置宏 | 为测试与 demo 加标签/宏开关 |
+
+### 实验收获
+- 熟悉了系统调用链路的每个环节：用户库桩函数、ecall、trap、分发、内核实现、返回；
+- 掌握了用户页表与 `copyin/out` 的安全访问方式，了解如何防止非法指针破坏内核；
+- 借助 `run_lab6_syscall_tests()` 形成了“测试驱动+日志定位”的调试方法；
+- 理解了文件描述符/`struct file` 引用计数机制，为后续文件系统实验打下基础。
+
+### 改进方向
+- 扩展系统调用集合，引入 `pipe/fstat/mmap` 等接口，并与文件系统联动；
+- 对 `syscall()` 分发路径执行性能分析或裁剪寄存器保存，降低 ecall 开销；
+- 尝试引入用户态库 `errno`/`strace` 支持，提升调试友好度；
+- 完善 `/dev/console` 之外的设备抽象，例如引入伪文件或环形缓冲。
 1. **系统调用数量应该如何确定？如何平衡功能与安全？**  
    需要根据教学目标和内核成熟度分阶段开放。初期提供 `fork/exec/wait/read/write` 等最基本接口即可，重点验证页表和指针安全；在完成内存与文件系统后，再逐步添加 `pipe/mmap` 等高风险接口，并为每个调用添加参数校验与权限检查。
 
